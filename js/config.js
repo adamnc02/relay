@@ -14,3 +14,8 @@ export function redirectTo() {
 }
 
 export const SUPABASE_JS_VERSION = '2.116.0';
+
+// Web Push: the public half of the project's VAPID key pair (public by
+// definition). The relay-push Edge Function signs with the matching private
+// key; if the two differ, every push is refused with 403.
+export const VAPID_PUBLIC_KEY = 'BB9I-sjb0TW_tjurRCh29HZ1Eab_sZBHKqnt1c7rBsagJxWDau0BnBCjybagPVJVIxImeOP87anjAKsVZX839Fk';

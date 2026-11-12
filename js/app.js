@@ -3,10 +3,11 @@
 
 import { STATUSES, SBY, ORDER, isHidden, parseJira, ts, actorLabel, isAdam, CLOSED_BY, safeHref, PROJECT_KEY_RE, JIRA_KEY_RE, NEW_JIRA_COLOUR, jiraProjectKey, friendlyError } from './model.js';
 import { esc, renderMarkdown } from './markdown.js';
-import { handoff, sicon, I_ALL, I_ARCH, CHEV, I_MENU, I_SEARCH, I_GOOGLE } from './icons.js';
+import { handoff, sicon, I_ALL, I_ARCH, CHEV, I_MENU, I_SEARCH, I_GOOGLE, I_BELL } from './icons.js';
 import { createAdapter, isDemo } from './data/index.js';
 import { createStore, saveSnapshot, readSnapshot, clearSnapshot } from './store.js';
 import { isNetworkError } from './data/supabase.js';
+import { pushState, turnOn, turnOff, sendTest, forgetThisDevice } from './push.js';
 
 const adapter = createAdapter();
 const store = createStore();
@@ -15,6 +16,8 @@ const $ = (id) => document.getElementById(id);
 const st = {
   view: 'board', nav: 'open', q: '', collapsed: { done: true }, folded: {}, sideOpen: false,
   openId: null, readOnly: false, live: 'connecting', user: null, offlineAt: null, booted: false,
+  // This device's notification state, from pushState(); null until checked.
+  push: null,
   // Rail sections: Apps starts collapsed, Jira open.
   railFold: { apps: true, jira: false },
 };
@@ -142,7 +145,15 @@ function renderOffline() {
   el.hidden = !st.readOnly;
   if (st.readOnly) el.innerHTML = `<b>Offline.</b> <span>Showing the copy saved ${esc(ago(st.offlineAt) || 'earlier')}. Read-only until the connection is back.</span> <button class="xbtn" id="retry">Retry</button>`;
 }
+const PUSH_LABEL = { on: 'On', off: 'Off', blocked: 'Blocked', demo: 'Demo' };
+function renderNotif() {
+  const el = $('sidenotif');
+  if (!el) return;
+  const label = PUSH_LABEL[st.push?.state] || '';
+  el.innerHTML = `<button class="nav-i" id="notifbtn" aria-haspopup="dialog">${I_BELL}<span class="nl">Notifications</span><span class="n" data-push="${esc(st.push?.state || '')}">${esc(label)}</span></button>`;
+}
 function renderFoot() {
+  renderNotif();
   const u = st.user || { name: '', initial: '?' };
   const liveText = isDemo() ? 'Sample data · edits not saved' : st.readOnly ? 'Offline · read-only' : st.live === 'live' ? 'Signed in with Google · live' : st.live === 'paused' ? 'Signed in · live updates paused' : 'Signed in with Google';
   $('sidefoot').innerHTML = `<span class="av a">${esc(u.initial)}</span><span class="foot-who">${esc(isDemo() ? 'Demo' : u.name)}<br><small>${esc(liveText)}</small></span>${isDemo() ? '' : `<button class="xbtn" id="signout">Sign out</button>`}`;
@@ -261,6 +272,122 @@ function ask({ title, fields, ok = 'Save' }) {
     form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
     $('m-' + fields[0].id).focus();
   });
+}
+
+/* ---------- notifications ---------- */
+
+const PUSH_TEXT = {
+  on: 'On for this device.',
+  off: 'Off for this device.',
+  blocked: "Blocked. Relay can't ask again: turn notifications on in Settings → Notifications → Relay on an iPhone, or in this browser's site settings, then reopen this panel.",
+  unsupported: "This browser can't receive notifications.",
+  'needs-home-screen': 'Not available in a Safari tab. Add Relay to the Home Screen and open it from there.',
+  unknown: "Couldn't check whether this device is registered. Check the connection and reopen this panel.",
+  demo: "The demo can't turn notifications on: it has no account and saves nothing. Sign in on the live app to turn them on.",
+};
+
+async function refreshPush() {
+  try { st.push = await pushState(adapter); } catch (e) { st.push = { state: 'unknown', message: e?.message }; }
+  renderNotif();
+  return st.push;
+}
+
+let notifBusy = false;
+function renderNotifPanel() {
+  const host = $('modalhost');
+  const s = st.push?.state || 'unknown';
+  const canToggle = !st.readOnly && ['on', 'off'].includes(s);
+  host.innerHTML = `<div class="scrim" data-cancel style="z-index:40"></div><div class="modal" id="notifpanel" role="dialog" aria-modal="true" aria-labelledby="n-heading">
+    <h2 id="n-heading">Notifications</h2>
+    <p class="nstate" data-state="${esc(s)}" role="status">${esc(st.readOnly && ['on', 'off'].includes(s) ? PUSH_TEXT[s] + ' Offline: changes wait for the connection.' : PUSH_TEXT[s])}</p>
+    <p class="hint">Relay notifies this device when a ticket moves to <b>Waiting for me</b>. Tapping the notification opens the ticket.</p>
+    <p class="hint"><b>iPhone and iPad:</b> notifications only work when Relay is installed on the Home Screen and opened from there. That is an iOS rule. In Safari, tap Share, then <b>Add to Home Screen</b>, then open Relay from its icon and turn notifications on here.</p>
+    <div class="modal-actions">
+      ${s === 'on' ? `<button type="button" class="btn" id="n-test" ${notifBusy || st.readOnly ? 'disabled' : ''}>Send test</button>` : ''}
+      ${s === 'on' ? `<button type="button" class="btn" id="n-off" ${notifBusy || !canToggle ? 'disabled' : ''}>Turn off</button>`
+        : `<button type="button" class="btn primary" id="n-on" ${notifBusy || !canToggle ? 'disabled' : ''}>Turn on</button>`}
+      <button type="button" class="btn" data-cancel>Close</button>
+    </div>
+  </div>`;
+  const close = () => { host.innerHTML = ''; };
+  host.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = close));
+  host.querySelector('#notifpanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  const act = (id, fn, okMsg) => {
+    const b = $(id);
+    if (!b) return;
+    b.onclick = async () => {
+      notifBusy = true;
+      renderNotifPanel();
+      try {
+        const r = await fn();
+        const msg = typeof okMsg === 'function' ? okMsg(r) : okMsg;
+        if (msg) toast(msg);
+      } catch (e) {
+        console.warn('[relay] notifications:', e);
+        toast(isNetworkError(e) ? "Couldn't reach Relay. Nothing changed." : friendlyError(e));
+      }
+      notifBusy = false;
+      await refreshPush();
+      if ($('notifpanel')) renderNotifPanel();
+    };
+  };
+  act('n-on', () => turnOn(adapter), 'Notifications are on for this device.');
+  act('n-off', () => turnOff(adapter), 'Notifications are off for this device.');
+  act('n-test', () => sendTest(adapter), (r) =>
+    r?.sent ? 'Test sent. It should arrive in a few seconds.'
+      : r?.gone ? 'This device\'s registration has expired. Turn notifications off, then on again.'
+        : r?.devices === 0 ? "This device isn't registered. Turn notifications on first."
+          : "The push service didn't accept the test. Try again shortly.");
+  host.querySelector('#notifpanel .modal-actions .btn:not([disabled])')?.focus();
+}
+async function openNotifications() {
+  if (!st.push) st.push = { state: 'unknown' };
+  renderNotifPanel();
+  await refreshPush();
+  if ($('notifpanel') && !notifBusy) renderNotifPanel();
+}
+
+/* ---------- opening a ticket from a link or a notification ---------- */
+
+// ?t=KEY opens that ticket (a notification's URL carries it). KEY is matched
+// against auto_key, jira_key, display_key and aliases.
+const ticketParam = (url) => { try { return new URL(url, location.href).searchParams.get('t'); } catch { return null; } };
+let pendingKey = ticketParam(location.href);
+function stripTicketParam() {
+  if (!new URLSearchParams(location.search).has('t')) return;
+  const q = location.search.slice(1).split('&').filter((p) => p && !/^t(=|$)/.test(p)).join('&');
+  history.replaceState(history.state, '', location.pathname + (q ? '?' + q : '') + location.hash);
+}
+function openByKey(key) {
+  if (!key) return;
+  if (!st.booted || !D) { pendingKey = key; return; }
+  const k = key.trim().toUpperCase();
+  const t = D.tickets.find((x) => x.auto_key === k || x.jira_key === k || x.display_key === k || (x.aliases || []).includes(k));
+  if (t) openTicket(t.id);
+  else toast(`${key} isn't on this board.`);
+}
+function openPending() {
+  const k = pendingKey;
+  pendingKey = null;
+  stripTicketParam();
+  openByKey(k);
+  checkOpenNote();
+}
+// The service worker also writes a tapped notification's URL to Cache Storage,
+// because on iOS a tap can reach the page without the URL or the message. Read
+// on start and whenever the page comes to the front, then deleted.
+const OPEN_NOTE_CACHE = 'relay-open-intent';
+async function checkOpenNote() {
+  if (!st.booted || typeof caches === 'undefined') return;
+  try {
+    const c = await caches.open(OPEN_NOTE_CACHE);
+    const key = new URL('./__open-intent', location.href).href;
+    const r = await c.match(key);
+    if (!r) return;
+    await c.delete(key);
+    const n = await r.json();
+    if (Date.now() - (n.at || 0) < 10 * 60e3) openByKey(ticketParam(n.url));
+  } catch { /* storage blocked */ }
 }
 
 /* ---------- writes ---------- */
@@ -593,6 +720,7 @@ function copy(text, msg, selectEl) {
 function bindShell() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if ($('notifpanel')) { $('modalhost').innerHTML = ''; return; }
       if ($('modalhost').innerHTML) return;
       if (st.openId) closeDrawer();
       if (st.sideOpen) { st.sideOpen = false; render(); }
@@ -604,6 +732,7 @@ function bindShell() {
     if (e.target.closest('#signout')) { signOut(); return; }
     if (e.target.closest('#retry')) { boot(); return; }
     if (e.target.closest('#signin')) { signIn(); return; }
+    if (e.target.closest('#notifbtn')) { st.sideOpen = false; render(); openNotifications(); return; }
     if (e.target.closest('.drawer') || e.target.closest('#modalhost') || e.target.closest('#gate')) return;
     const xp = e.target.closest('[data-expand]');
     if (xp) { const k = xp.dataset.expand; st.folded[k] = !st.folded[k]; render(); return; }
@@ -672,7 +801,18 @@ function bindShell() {
 
   addEventListener('online', () => { if (st.readOnly) boot(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && st.booted && !isDemo() && !st.readOnly) refresh();
+    if (document.visibilityState !== 'visible') return;
+    checkOpenNote();
+    if (st.booted && !isDemo() && !st.readOnly) refresh();
+  });
+  addEventListener('focus', () => checkOpenNote());
+  addEventListener('pageshow', () => checkOpenNote());
+  // A notification tapped while Relay is open: the service worker focuses this
+  // window and posts the URL.
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data?.type !== 'relay:open') return;
+    if (typeof caches !== 'undefined') caches.open(OPEN_NOTE_CACHE).then((c) => c.delete(new URL('./__open-intent', location.href).href)).catch(() => {});
+    openByKey(ticketParam(e.data.url));
   });
 }
 
@@ -722,6 +862,8 @@ async function signIn() {
   try { await adapter.signIn(); } catch (e) { toast(e.message || String(e)); }
 }
 async function signOut() {
+  // This device stops getting notifications once nobody is signed in here.
+  await forgetThisDevice(adapter);
   await adapter.signOut();
   clearSnapshot();
   location.replace(location.pathname);
@@ -734,6 +876,8 @@ function goOffline(snap) {
   st.booted = true;
   showApp();
   render();
+  openPending();
+  refreshPush();
 }
 
 let unsub = null;
@@ -763,6 +907,8 @@ async function boot() {
   showApp();
   render();
   scheduleSnapshot();
+  openPending();
+  refreshPush();
   unsub?.();
   unsub = adapter.subscribe(
     (changes) => { store.apply(changes); render(); scheduleSnapshot(); },

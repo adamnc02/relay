@@ -4,7 +4,9 @@
 //   and the cached copy is used only when the network fails.
 // - Cross-origin requests (Supabase API, Realtime, Google Fonts) are never intercepted
 //   or cached. The offline copy of row data lives in localStorage, written by the app.
-const VERSION = 'v5';
+// - Push: 'push' shows the notification the relay-push Edge Function sent;
+//   'notificationclick' opens the ticket (see the end of this file).
+const VERSION = 'v6';
 const CACHE = `relay-shell-${VERSION}`;
 const SHELL = [
   './',
@@ -65,4 +67,49 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-// Push notifications (a later phase): add 'push' and 'notificationclick' handlers here.
+// Push. The payload is { title, body, tag, url } from the relay-push Edge
+// Function. iOS requires every push to show a notification (a push handled
+// without one counts against the site and can cost it the permission), so
+// this always shows something, even for a payload it can't read.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = {}; }
+  const title = typeof d.title === 'string' && d.title ? d.title : 'Relay';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: typeof d.body === 'string' ? d.body : 'A ticket is waiting for you.',
+    tag: typeof d.tag === 'string' ? d.tag : undefined,
+    icon: 'icon-192.png',
+    data: { url: typeof d.url === 'string' ? d.url : self.registration.scope },
+  }));
+});
+
+// A tap opens the ticket: the URL carries ?t=<display key>. An open Relay
+// window is focused and told the URL by postMessage; otherwise a new window
+// opens at the URL. The URL is also written to Cache Storage, which the page
+// reads on start and whenever it comes to the front, because on iOS a tap can
+// reach the page with neither the URL nor the message.
+const OPEN_NOTE_CACHE = 'relay-open-intent';
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const scope = self.registration.scope;
+  let target;
+  try { target = new URL(e.notification.data?.url || scope, scope); } catch { target = new URL(scope); }
+  // Only ever somewhere inside Relay.
+  const url = target.href.startsWith(scope) ? target.href : scope;
+
+  const note = caches.open(OPEN_NOTE_CACHE)
+    .then((c) => c.put(new URL('__open-intent', scope).href,
+      new Response(JSON.stringify({ url, at: Date.now() }), { headers: { 'Content-Type': 'application/json' } })))
+    .catch(() => {});
+
+  e.waitUntil(note
+    .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+    .then((windows) => {
+      const w = windows.find((c) => c.url.startsWith(scope));
+      if (w) {
+        w.postMessage({ type: 'relay:open', url });
+        return w.focus();
+      }
+      return self.clients.openWindow(url);
+    }));
+});
