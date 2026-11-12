@@ -157,6 +157,7 @@ a{color:var(--accent)}
 .si{flex:none;display:block}
 /* min-width is the six 232px minimums plus gaps; max-content would size each column to its unwrapped text */
 .board{display:grid;grid-template-columns:repeat(6,minmax(232px,1fr));gap:10px;min-width:calc(6 * 232px + 5 * 10px)}
+.mbrand{display:none}
 .col{background:var(--sunk);border-radius:var(--r);padding:8px;display:flex;flex-direction:column;gap:8px;min-height:120px}
 .col.drop{outline:2px dashed var(--accent)}
 .col[data-s="waiting"]{background:var(--wait-bg);outline:1px solid var(--wait-line)}
@@ -186,6 +187,13 @@ a{color:var(--accent)}
   .bar2{padding:8px 12px}
   .bar .tag{display:none}
   .search kbd{display:none}
+  /* Brand row: the rail (and its brand) is hidden on a phone, and the row keeps the toolbar clear of
+     the browser's blurred band under the status bar. */
+  .mbrand{display:flex;align-items:center;gap:10px;padding:14px 14px 8px;font-weight:700;font-size:18px;letter-spacing:-.01em}
+  /* Board stacks its columns and scrolls vertically; an empty column shrinks to its heading. */
+  .boardwrap{overflow-x:visible;padding:12px}
+  .board{grid-template-columns:minmax(0,1fr);min-width:0;gap:12px}
+  .col{min-height:0}
 }
 
 /* drawer */
