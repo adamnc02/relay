@@ -85,7 +85,12 @@ One channel, `relay-board`, with a `postgres_changes` listener per table (`schem
 ## View defaults
 
 - The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
-- The rail's **Apps** and **Jira** headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
+- The rail lists Waiting for me, All tickets and Archived, then **Jira**, then **Apps**. Both headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
+
+## Phone layout (max-width 760px)
+
+- The rail becomes a slide-in drawer opened from the menu button. A **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible. It also keeps the toolbar clear of the browser's blurred band under the status bar.
+- The **board stacks its six columns** in one vertical scroll, with no sideways scrolling. An empty column shrinks to its heading. Drag and drop is for desktop; on a phone, status changes from the ticket panel.
 
 ## Offline
 

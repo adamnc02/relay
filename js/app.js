@@ -118,8 +118,8 @@ function renderNav() {
     it('waiting', 'Waiting for me', live.filter((t) => t.status === 'waiting').length, sicon('waiting'), 'wait') +
     it('open', 'All tickets', live.length, I_ALL) +
     it('archived', 'Archived', D.tickets.filter((t) => hidden(t) && !isParent(t)).length, I_ARCH) +
-    (apps.length ? sec('apps', 'Apps', apps, '') : '') +
-    sec('jira', 'Jira', jira, `<p class="nav-empty">Paste a Jira issue link into search to add your first Jira ticket.</p>`);
+    sec('jira', 'Jira', jira, `<p class="nav-empty">Paste a Jira issue link into search to add your first Jira ticket.</p>`) +
+    (apps.length ? sec('apps', 'Apps', apps, '') : '');
 }
 function navTitle() {
   const n = st.nav;
