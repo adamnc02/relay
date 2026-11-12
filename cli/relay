@@ -1,0 +1,2302 @@
+#!/usr/bin/python3
+"""relay: the Relay command line and the Claude Code hook entry points.
+
+Python 3 standard library only. Every database call shells out to psql as the
+claude_relay role (password from ~/.pgpass), with every value passed as a psql
+variable. Local state lives in ~/.claude/relay/ (or $RELAY_HOME).
+
+Run `relay help` for the commands.
+"""
+
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+VERSION = "1.0.0"
+
+CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
+                    "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
+TZ = "Europe/London"
+KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,9}-R?[0-9]+$")
+KICKOFF_RE = re.compile(r"^\s*continue\s+([A-Za-z][A-Za-z0-9_]{1,9}-[Rr]?[0-9]+)\b", re.IGNORECASE)
+STATUSES = ("backlog", "next", "progress", "waiting", "testing", "done")
+LABELS = {"backlog": "Backlog", "next": "Up next", "progress": "In progress",
+          "waiting": "Waiting for me", "testing": "Testing", "done": "Done"}
+CONTEXT_CAP = 9500           # Claude Code caps hook context at 10,000 characters
+NOTES_EVERY = 30             # seconds between PostToolUse note checks, per session
+BACKOFF = 120                # seconds to wait after a failed check
+UNATTACHED_TTL = 2 * 86400   # queued file jobs of a session with no ticket are kept this long
+SESSION_TTL = 30 * 86400     # local session state is pruned after this long
+SWEEP_CAP = 300              # a repo with more changed files than this is skipped by the sweep
+RELAY_MARK = "/.claude/relay/bin/relay"
+
+
+# ---------------------------------------------------------------------------
+# Errors and the time box
+# ---------------------------------------------------------------------------
+
+class RelayError(Exception):
+    """A user-facing error: printed as `relay: <message>`, exit 1."""
+
+
+class DBError(RelayError):
+    """psql failed. sqlstate is set when the server rejected the statement."""
+
+    def __init__(self, message, sqlstate=None):
+        RelayError.__init__(self, message)
+        self.sqlstate = sqlstate
+
+
+class TimeBox(Exception):
+    pass
+
+
+_deadline = [None]
+
+
+def start_timebox(seconds):
+    """Hooks run under a hard wall-clock limit: SIGALRM raises TimeBox."""
+    def _fire(signum, frame):
+        raise TimeBox()
+    signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    _deadline[0] = time.time() + seconds
+
+
+def remaining(default=8.0):
+    if _deadline[0] is None:
+        return default
+    return max(0.2, _deadline[0] - time.time() - 0.15)
+
+
+# ---------------------------------------------------------------------------
+# Local state: ~/.claude/relay/
+# ---------------------------------------------------------------------------
+
+def home():
+    return os.environ.get("RELAY_HOME") or os.path.expanduser("~/.claude/relay")
+
+
+def sdir(*parts):
+    d = os.path.join(home(), *parts)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def log(msg):
+    """Hook failures go to a small log file, never to stdout or stderr."""
+    try:
+        path = os.path.join(sdir("log"), "relay.log")
+        if os.path.exists(path) and os.path.getsize(path) > 1000000:
+            os.replace(path, path + ".1")
+        with open(path, "a") as f:
+            f.write("%s [%d] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid(), msg))
+    except Exception:
+        pass
+
+
+def atomic_write(path, text, mode=0o644):
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def safe_sid(sid):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", sid or "")[:120]
+
+
+def state_path(sid):
+    return os.path.join(sdir("sessions"), safe_sid(sid) + ".json")
+
+
+def load_state(sid):
+    if not sid:
+        return {}
+    try:
+        with open(state_path(sid)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+class StateLock(object):
+    """flock around a read-modify-write of one session's state file."""
+
+    def __init__(self, sid):
+        self.path = os.path.join(sdir("sessions"), safe_sid(sid) + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *a):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+
+
+def update_state(sid, fn):
+    with StateLock(sid):
+        st = load_state(sid)
+        st.setdefault("session_id", sid)
+        fn(st)
+        atomic_write(state_path(sid), json.dumps(st, indent=1, sort_keys=True))
+        return st
+
+
+def current_ticket(st):
+    """The ticket this session works on: the last one it attached."""
+    tickets = st.get("tickets") or []
+    return tickets[-1] if tickets else None
+
+
+def paths_file(sid):
+    return os.path.join(sdir("sessions"), safe_sid(sid) + ".paths")
+
+
+def logged_paths(sid):
+    """Paths this session changed with Write/Edit/NotebookEdit (from the file hook)."""
+    try:
+        with open(paths_file(sid)) as f:
+            return set(line.rstrip("\n") for line in f if line.strip())
+    except OSError:
+        return set()
+
+
+def session_id(args=None):
+    sid = getattr(args, "session", None) if args is not None else None
+    return sid or os.environ.get("RELAY_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+
+
+def actor(sid):
+    return "claude:" + (sid or "cli")
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# The offline queue: one JSON file per job in queue/, written atomically
+# ---------------------------------------------------------------------------
+
+def enqueue(job, qdir=None):
+    qdir = qdir or sdir("queue")
+    job = dict(job)
+    job.setdefault("queued_at", time.time())
+    name = "%020d-%d-%s.json" % (time.time_ns(), os.getpid(), uuid.uuid4().hex[:8])
+    atomic_write(os.path.join(qdir, name), json.dumps(job))
+    return name
+
+
+def queue_jobs(qdir=None):
+    """[(name, job)] oldest first. Unreadable files are removed."""
+    qdir = qdir or sdir("queue")
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(qdir) if n.endswith(".json") and not n.startswith("."))
+    except OSError:
+        return out
+    for n in names:
+        p = os.path.join(qdir, n)
+        try:
+            with open(p) as f:
+                out.append((n, json.load(f)))
+        except ValueError:
+            ack([n], qdir)
+        except OSError:
+            pass
+    return out
+
+
+def ack(names, qdir=None):
+    qdir = qdir or sdir("queue")
+    for n in names:
+        try:
+            os.unlink(os.path.join(qdir, n))
+        except OSError:
+            pass
+
+
+class QueueLock(object):
+    """Only one flusher at a time. acquired is False when another holds it."""
+
+    def __init__(self, qdir=None):
+        self.path = os.path.join(qdir or sdir("queue"), ".lock")
+        self.fd = None
+        self.acquired = False
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.acquired = True
+        except OSError:
+            self.acquired = False
+        return self
+
+    def __exit__(self, *a):
+        if self.acquired:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+def plan_flush(jobs, states, now=None):
+    """Split queued jobs into what can be sent now.
+
+    jobs: [(name, job)]; states: {session_id: state}.
+    Returns (files, ends, drop): files is [(name, ticket_id, job)], ends is
+    [(name, state, job)], drop is [name]. Jobs neither sent nor dropped stay
+    queued (a session that hasn't attached a ticket yet).
+    """
+    now = now or time.time()
+    files, ends, drop = [], [], []
+    for name, job in jobs:
+        st = states.get(job.get("session")) or {}
+        cur = current_ticket(st)
+        if job.get("type") == "file":
+            tid = job.get("ticket_id") or (cur or {}).get("id")
+            if tid:
+                files.append((name, tid, job))
+            elif st.get("ended") or now - job.get("queued_at", now) > UNATTACHED_TTL:
+                drop.append(name)
+        elif job.get("type") == "session_end":
+            if cur and not st.get("closed"):
+                ends.append((name, st, job))
+            else:
+                drop.append(name)
+        else:
+            drop.append(name)
+    return files, ends, drop
+
+
+# ---------------------------------------------------------------------------
+# psql
+# ---------------------------------------------------------------------------
+
+def find_psql():
+    exe = os.environ.get("RELAY_PSQL") or shutil.which("psql")
+    if exe:
+        return exe
+    for p in ("/opt/homebrew/bin/psql", "/usr/local/bin/psql", "/opt/homebrew/opt/libpq/bin/psql",
+              "/usr/local/opt/libpq/bin/psql", "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"):
+        if os.path.exists(p):
+            return p
+    raise DBError("psql not found")
+
+
+def psql(sql, variables=None, timeout=None):
+    """Run SQL (read from stdin by psql, so :'name' variables interpolate) and
+    return stdout. Every value goes in as a psql variable, never into the SQL."""
+    timeout = timeout if timeout is not None else remaining(20.0)
+    ct = max(2, min(5, int(timeout)))
+    conn = os.environ.get("RELAY_CONNINFO", CONNINFO_DEFAULT) + \
+        " connect_timeout=%d application_name=relay-cli" % ct
+    cmd = [find_psql(), "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
+           "-v", "VERBOSITY=verbose", "-1", "-d", conn, "-f", "-"]
+    for k, v in sorted((variables or {}).items()):
+        if not re.match(r"^[a-z_][a-z0-9_]*$", k):
+            raise ValueError("bad psql variable name %r" % k)
+        cmd += ["-v", "%s=%s" % (k, "" if v is None else str(v))]
+    env = dict(os.environ)
+    env.setdefault("PGPASSFILE", os.path.expanduser("~/.pgpass"))
+    env["PGCONNECT_TIMEOUT"] = str(ct)
+    try:
+        r = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise DBError("Relay did not answer within %.1fs" % timeout)
+    if r.returncode != 0:
+        err = r.stderr or ""
+        m = re.search(r"ERROR:\s+([0-9A-Z]{5}):\s+(.*)", err)
+        if m:
+            raise DBError(m.group(2).strip(), m.group(1))
+        raise DBError(err.strip().splitlines()[0] if err.strip() else "psql failed (%d)" % r.returncode)
+    return r.stdout
+
+
+def q(sql, variables=None, timeout=None):
+    """psql that returns one JSON value."""
+    out = psql(sql, variables, timeout).strip()
+    if not out:
+        return None
+    return json.loads(out)
+
+
+def explain_db(e):
+    if e.sqlstate == "23514":
+        return "Relay refused this (rule): %s" % e
+    if e.sqlstate == "23505":
+        return "Relay refused this (that ID is taken): %s" % e
+    if e.sqlstate:
+        return "Relay error %s: %s" % (e.sqlstate, e)
+    return "can't reach Relay: %s" % e
+
+
+# ---------------------------------------------------------------------------
+# Paths, projects and git (pure parts are unit-tested)
+# ---------------------------------------------------------------------------
+
+def norm(p):
+    return os.path.normpath(os.path.expanduser(p)) if p else p
+
+
+def path_under(path, prefix):
+    path, prefix = norm(path), norm(prefix)
+    if not path or not prefix:
+        return False
+    if prefix == "/":
+        return True
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+
+def match_project(cwd, projects):
+    """The non-archived project whose paths hold the longest prefix of cwd,
+    matched on whole path components, or None."""
+    best, best_len = None, -1
+    for p in projects:
+        if p.get("archived"):
+            continue
+        for pre in p.get("paths") or []:
+            n = norm(pre)
+            if path_under(cwd, n) and len(n) > best_len:
+                best, best_len = p, len(n)
+    return best
+
+
+def inbox(projects):
+    for p in projects:
+        if p.get("key") == "INB":
+            return p
+    return None
+
+
+def repo_root(path):
+    """The nearest folder at or above path holding .git (a dir or a worktree file)."""
+    p = norm(path)
+    if p and not os.path.isdir(p):
+        p = os.path.dirname(p)
+    while p and p != "/":
+        if os.path.exists(os.path.join(p, ".git")):
+            return p
+        p = os.path.dirname(p)
+    return None
+
+
+def git(args, cwd, timeout=5.0):
+    try:
+        r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True,
+                           timeout=timeout, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def main_worktree(path):
+    """For a linked worktree, the main checkout's folder; else None."""
+    root = repo_root(path)
+    if not root or not os.path.isfile(os.path.join(root, ".git")):
+        return None
+    out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root, 2.0)
+    if not out:
+        return None
+    common = out.strip()
+    return os.path.dirname(common) if common.endswith("/.git") else None
+
+
+def local_paths(path=None):
+    """~/.claude/relay/paths.json: {"/folder/prefix": "KEY"}, checked before the
+    database's projects.paths (for machines whose folders differ)."""
+    try:
+        with open(path or os.path.join(home(), "paths.json")) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return dict((norm(k), v.strip().upper()) for k, v in d.items()
+                if isinstance(k, str) and isinstance(v, str) and k.strip())
+
+
+def match_local(path, projects, overrides):
+    best, best_len = None, -1
+    for prefix, key in (overrides or {}).items():
+        if path_under(path, prefix) and len(prefix) > best_len:
+            p = next((x for x in projects if x.get("key") == key and not x.get("archived")), None)
+            if p:
+                best, best_len = p, len(prefix)
+    return best
+
+
+def project_for(cwd, projects, overrides=None):
+    """(project, matched): the local paths.json first, then projects.paths, for the
+    folder and then for a linked worktree's main checkout; else Inbox."""
+    overrides = local_paths() if overrides is None else overrides
+    candidates = [cwd]
+    mw = main_worktree(cwd)
+    if mw:
+        candidates.append(mw)
+    for c in candidates:
+        p = match_local(c, projects, overrides) or match_project(c, projects)
+        if p:
+            return p, True
+    return inbox(projects), False
+
+
+def project_paths(project, overrides=None):
+    """A project's folders: projects.paths plus this machine's paths.json entries for it."""
+    overrides = local_paths() if overrides is None else overrides
+    paths = list((project or {}).get("paths") or [])
+    key = (project or {}).get("key")
+    paths += [f for f, k in sorted(overrides.items()) if key and k == key and f not in paths]
+    return paths
+
+
+def parse_porcelain_z(out):
+    """`git status --porcelain=v1 -z` output -> {relative path: XY}."""
+    res = {}
+    parts = (out or "").split("\0")
+    i = 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        xy, path = e[:2], e[3:]
+        if xy[0] in "RC" or xy[1] in "RC":
+            i += 1  # the original path follows a rename/copy
+        res[path] = xy
+    return res
+
+
+def repo_state(root):
+    """{'head', 'at', 'files': {rel: [XY, mtime_ns|None]}} or None if git fails."""
+    st = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], root, 8.0)
+    if st is None:
+        return None
+    head = (git(["rev-parse", "HEAD"], root, 2.0) or "").strip()
+    files = {}
+    for rel, xy in parse_porcelain_z(st).items():
+        if len(files) >= 5000:
+            break
+        try:
+            mt = os.lstat(os.path.join(root, rel)).st_mtime_ns
+        except OSError:
+            mt = None
+        files[rel] = [xy, mt]
+    return {"head": head, "at": time.time(), "files": files}
+
+
+def changed_since(snap, cur, committed=()):
+    """Relative paths changed between two repo_state()s: new or changed dirty
+    entries, dirty entries that went clean, and files in commits made since."""
+    changed = set()
+    sf, cf = snap.get("files") or {}, cur.get("files") or {}
+    for p, v in cf.items():
+        if list(sf.get(p) or []) != list(v):
+            changed.add(p)
+    for p in sf:
+        if p not in cf:
+            changed.add(p)
+    changed.update(x for x in committed if x)
+    return changed
+
+
+def committed_since(root, snap, cur):
+    if not snap.get("head") or snap.get("head") == cur.get("head"):
+        return []
+    since = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(snap.get("at") or 0))
+    out = git(["log", "--no-merges", "--since=" + since, "--format=", "--name-only",
+               snap["head"] + ".." + (cur.get("head") or "HEAD")], root, 5.0)
+    return [l for l in (out or "").splitlines() if l.strip()]
+
+
+def sweep_repo(root, snap, written):
+    """[(abs path)] changed in root since snap and not already logged as write/edit,
+    plus the new state to re-baseline on."""
+    cur = repo_state(root)
+    if cur is None:
+        return [], None
+    rel = changed_since(snap, cur, committed_since(root, snap, cur))
+    paths = sorted(os.path.join(root, r) for r in rel)
+    paths = [p for p in paths if p not in written]
+    if len(paths) > SWEEP_CAP:
+        log("sweep: %s has %d changed files; skipped" % (root, len(paths)))
+        return [], cur
+    return paths, cur
+
+
+def snapshot_targets(cwd, projects=None, project=None):
+    """Git repos to snapshot: cwd's repo and the repos in the project's paths."""
+    roots = []
+    for p in [cwd] + (project_paths(project) if project else []):
+        r = repo_root(p) if p and os.path.exists(p) else None
+        if r and r not in roots:
+            roots.append(r)
+    return roots
+
+
+def add_snapshots(sid, roots):
+    """Snapshot each repo not already in this session's snapshot."""
+    st = load_state(sid)
+    have = st.get("snapshot") or {}
+    new = {}
+    for r in roots:
+        if r in have or r in new:
+            continue
+        s = repo_state(r)
+        if s is not None:
+            new[r] = s
+    if new:
+        def put(s):
+            s.setdefault("snapshot", {})
+            for k, v in new.items():
+                s["snapshot"].setdefault(k, v)
+        update_state(sid, put)
+    return list(new)
+
+
+def do_sweep(sid):
+    """Queue every git-changed file since the snapshot as 'shell', then re-baseline."""
+    st = load_state(sid)
+    snaps = st.get("snapshot") or {}
+    written = logged_paths(sid)
+    found, rebase = [], {}
+    for root, snap in sorted(snaps.items()):
+        paths, cur = sweep_repo(root, snap, written)
+        if cur is not None:
+            rebase[root] = cur
+        found.extend(paths)
+    cur = current_ticket(st)
+    for p in found:
+        enqueue({"type": "file", "session": sid, "path": p, "kind": "shell", "at": now_iso(),
+                 "ticket_id": (cur or {}).get("id")})
+    if rebase:
+        def put(s):
+            s.setdefault("snapshot", {}).update(rebase)
+        update_state(sid, put)
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Transcript
+# ---------------------------------------------------------------------------
+
+def last_assistant_text(path, max_bytes=3000000):
+    """The text of the last main-thread assistant message in a transcript JSONL."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - max_bytes)
+            f.seek(start)
+            data = f.read()
+    except (OSError, TypeError):
+        return None
+    lines = data.split(b"\n")
+    if start > 0:
+        lines = lines[1:]
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        content = (obj.get("message") or {}).get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = "\n".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            text = ""
+        if text.strip():
+            return text.strip()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# SQL
+# ---------------------------------------------------------------------------
+
+RESOLVE = "(t.auto_key = :'key' or t.jira_key = :'key' or :'key' = any (t.aliases))"
+
+SQL_CONTEXT = """
+select json_build_object(
+  'projects', (select coalesce(json_agg(json_build_object('id', p.id, 'key', p.key, 'name', p.name,
+                 'paths', p.paths, 'archived', p.archived, 'kind', p.kind) order by p.sort, p.key), '[]')
+               from relay.projects p),
+  'tickets', (select coalesce(json_agg(json_build_object(
+                 'id', t.id, 'key', t.display_key, 'title', t.title, 'status', t.status, 'need', t.need,
+                 'project', p.key, 'parent', pt.display_key, 'parent_id', t.parent_id, 'phase', t.phase,
+                 'needs_wrapup', t.needs_wrapup, 'next_step', t.next_step,
+                 'updated', to_char(t.updated_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+                 'children', (select count(*) from relay.tickets c where c.parent_id = t.id and c.archived_at is null),
+                 'children_done', (select count(*) from relay.tickets c where c.parent_id = t.id
+                                    and c.archived_at is null and c.status = 'done'),
+                 'last_cwd', (select s.cwd from relay.sessions s where s.ticket_id = t.id
+                               order by s.started_at desc limit 1),
+                 'ended', (select to_char(max(s.ended_at) at time zone :'tz', 'YYYY-MM-DD HH24:MI')
+                            from relay.sessions s where s.ticket_id = t.id))
+               order by p.sort, coalesce(pt.seq, t.seq), t.parent_id nulls first, t.phase nulls last, t.seq), '[]')
+              from relay.tickets t
+              join relay.projects p on p.id = t.project_id
+              left join relay.tickets pt on pt.id = t.parent_id
+              where t.archived_at is null and (t.status <> 'done' or t.needs_wrapup))
+)
+"""
+
+SQL_GET = """
+with t as (select * from relay.tickets t where """ + RESOLVE + """ limit 1),
+fam as (select c.id from relay.tickets c join t on c.parent_id = t.id union select id from t),
+seen as (
+  update relay.events e set seen_at = now()
+   where :'mark' = '1'
+     and e.ticket_id in (select id from t union select parent_id from t where parent_id is not null)
+     and e.kind = 'note' and e.actor = 'adam' and e.seen_at is null
+  returning e.id, e.ticket_id, e.at, e.body
+)
+select json_build_object(
+  'ticket', (select json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
+               'jira_key', t.jira_key, 'jira_url', t.jira_url, 'aliases', t.aliases, 'title', t.title,
+               'status', t.status, 'priority', t.priority, 'need', t.need, 'brief', t.brief,
+               'next_step', t.next_step, 'phase', t.phase, 'links', t.links, 'updated_by', t.updated_by,
+               'needs_wrapup', t.needs_wrapup, 'session_ids', t.session_ids,
+               'archived', to_char(t.archived_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+               'done', to_char(t.done_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+               'updated', to_char(t.updated_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+               'project', p.key, 'project_name', p.name, 'project_kind', p.kind, 'project_paths', p.paths,
+               'children', (select count(*) from relay.tickets c where c.parent_id = t.id))
+             from t join relay.projects p on p.id = t.project_id),
+  'parent', (select json_build_object('id', pp.id, 'key', pp.display_key, 'title', pp.title,
+               'status', pp.status, 'brief', pp.brief)
+             from t join relay.tickets pp on pp.id = t.parent_id),
+  'phases', (select coalesce(json_agg(json_build_object('key', c.display_key, 'title', c.title,
+               'status', c.status, 'phase', c.phase, 'need', c.need, 'archived', c.archived_at is not null)
+               order by c.phase nulls last, c.created_at), '[]')
+             from relay.tickets c join t on c.parent_id = coalesce(t.parent_id, t.id)),
+  'sessions', (select coalesce(json_agg(json_build_object('session_id', s.session_id, 'machine', s.machine,
+               'cwd', s.cwd, 'summary', s.summary, 'open_items', s.open_items, 'commits', s.commits,
+               'prs', s.prs, 'closed_by', s.closed_by,
+               'started', to_char(s.started_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+               'ended', to_char(s.ended_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'))
+               order by s.started_at desc), '[]')
+             from relay.sessions s join t on s.ticket_id = t.id),
+  'files', (select coalesce(json_agg(json_build_object('path', f.path, 'kinds', f.kinds, 'times', f.times,
+               'last', to_char(f.last_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'), 'last_at', f.last_at)
+               order by f.path), '[]')
+            from relay.ticket_files f where f.ticket_id in (select id from fam)),
+  'docs', (select coalesce(json_agg(json_build_object('path', d.path, 'label', d.label) order by d.added_at), '[]')
+           from relay.ticket_docs d join t on d.ticket_id = t.id),
+  'events', (select coalesce(json_agg(x.j order by x.at desc), '[]') from (
+               select e.at, json_build_object('at', to_char(e.at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+                 'actor', e.actor, 'kind', e.kind, 'body', e.body, 'from', e.from_status, 'to', e.to_status,
+                 'seen', e.seen_at is not null) j
+               from relay.events e join t on e.ticket_id = t.id order by e.at desc limit 12) x),
+  'new_notes', (select coalesce(json_agg(json_build_object('key', tt.display_key, 'body', n.body,
+               'at', to_char(n.at at time zone :'tz', 'DD Mon HH24:MI')) order by n.at), '[]')
+             from seen n join relay.tickets tt on tt.id = n.ticket_id)
+)
+"""
+
+SQL_FIND = """
+select coalesce(json_agg(x.j order by x.exact desc, x.updated desc), '[]') from (
+  select (t.auto_key = upper(:'q') or t.jira_key = upper(:'q') or upper(:'q') = any (t.aliases)) as exact,
+         t.updated_at as updated,
+         json_build_object('key', t.display_key, 'title', t.title, 'status', t.status, 'project', p.key,
+           'parent', pt.display_key, 'archived', t.archived_at is not null, 'need', t.need) j
+    from relay.tickets t
+    join relay.projects p on p.id = t.project_id
+    left join relay.tickets pt on pt.id = t.parent_id
+   where (t.auto_key = upper(:'q') or t.jira_key = upper(:'q') or upper(:'q') = any (t.aliases)
+          or strpos(lower(t.title), lower(:'q')) > 0 or strpos(lower(t.brief), lower(:'q')) > 0)
+     and (:'all' = '1' or (t.archived_at is null
+          and (t.status <> 'done' or t.done_at > now() - interval '14 days')))
+     and (:'proj' = '' or p.key = :'proj')
+   order by 1 desc, t.updated_at desc
+   limit 30) x
+"""
+
+SQL_RESOLVE = """
+select json_build_object('id', t.id, 'key', t.display_key, 'title', t.title, 'status', t.status,
+  'project_id', t.project_id, 'parent_id', t.parent_id,
+  'children', (select count(*) from relay.tickets c where c.parent_id = t.id))
+from relay.tickets t where """ + RESOLVE + """ limit 1
+"""
+
+SQL_PROJECTS = """
+select coalesce(json_agg(json_build_object('id', p.id, 'key', p.key, 'name', p.name, 'paths', p.paths,
+  'archived', p.archived, 'kind', p.kind) order by p.sort, p.key), '[]') from relay.projects p
+"""
+
+SQL_CREATE = """
+with ins as (
+  insert into relay.tickets (project_id, title, status, need, brief, next_step, parent_id, phase,
+                             updated_by, session_ids)
+  select :'project_id'::uuid, :'title', :'status'::relay.status,
+         case when :'status' = 'waiting' then nullif(:'need', '') else null end,
+         :'brief', nullif(:'next', ''), nullif(:'parent_id', '')::uuid,
+         case when :'parent_id' = '' then null
+              when :'phase' <> '' then nullif(:'phase', '')::smallint
+              else (select coalesce(max(c.phase), 0) + 1 from relay.tickets c
+                     where c.parent_id = nullif(:'parent_id', '')::uuid) end,
+         :'by', case when :'sid' = '' then '{}'::text[] else array[:'sid'] end
+  returning id, display_key, auto_key, seq, phase
+),
+s as (
+  insert into relay.sessions (ticket_id, session_id, machine, cwd)
+  select id, :'sid', :'machine', :'cwd' from ins where :'sid' <> ''
+  on conflict (ticket_id, session_id) do nothing
+  returning 1
+)
+select json_build_object('id', id, 'key', display_key, 'auto_key', auto_key, 'seq', seq, 'phase', phase,
+                         'session', (select count(*) from s)) from ins
+"""
+
+SQL_ATTACH = """
+with t as (select t.id from relay.tickets t where """ + RESOLVE + """ limit 1),
+u as (
+  update relay.tickets x
+     set session_ids = case when :'sid' = any (x.session_ids) then x.session_ids else x.session_ids || :'sid'::text end,
+         needs_wrapup = false, updated_by = :'by'
+    from t where x.id = t.id
+  returning x.id, x.display_key, x.title, x.status, x.project_id
+),
+s as (
+  insert into relay.sessions (ticket_id, session_id, machine, cwd)
+  select id, :'sid', :'machine', :'cwd' from u
+  on conflict (ticket_id, session_id) do nothing
+  returning 1
+)
+select json_build_object('id', u.id, 'key', u.display_key, 'title', u.title, 'status', u.status,
+  'project', (select p.key from relay.projects p where p.id = u.project_id),
+  'project_paths', (select p.paths from relay.projects p where p.id = u.project_id)) from u
+"""
+
+SQL_STATUS = """
+with t as (select t.id, exists (select 1 from relay.tickets c where c.parent_id = t.id) as is_parent
+             from relay.tickets t where t.id = :'tid'::uuid),
+u as (
+  update relay.tickets x
+     set status = :'status'::relay.status,
+         need = case when :'status' = 'waiting' then nullif(:'need', '') else null end,
+         next_step = coalesce(nullif(:'next', ''), x.next_step),
+         updated_by = :'by'
+    from t where x.id = t.id and not t.is_parent
+  returning x.display_key, x.status
+)
+select json_build_object('parent', (select is_parent from t), 'key', (select display_key from u),
+                         'status', (select status from u))
+"""
+
+SQL_CLOSE = """
+with t as (select t.id, t.display_key, exists (select 1 from relay.tickets c where c.parent_id = t.id) as is_parent
+             from relay.tickets t where t.id = :'tid'::uuid),
+s as (
+  insert into relay.sessions as ss (ticket_id, session_id, machine, cwd, ended_at, summary, open_items,
+                                    commits, prs, closed_by)
+  select t.id, :'sid', :'machine', :'cwd', now(), nullif(:'summary', ''), nullif(:'open', ''),
+         array(select json_array_elements_text(:'commits'::json)),
+         array(select json_array_elements_text(:'prs'::json)), :'closed_by'
+    from t
+  on conflict (ticket_id, session_id) do update
+     set ended_at = now(),
+         summary = case when excluded.summary is null then ss.summary
+                        when coalesce(ss.summary, '') = '' then excluded.summary
+                        else ss.summary || E'\\n' || excluded.summary end,
+         open_items = coalesce(excluded.open_items, ss.open_items),
+         commits = array(select distinct unnest(ss.commits || excluded.commits)),
+         prs = array(select distinct unnest(ss.prs || excluded.prs)),
+         closed_by = excluded.closed_by,
+         machine = coalesce(ss.machine, excluded.machine),
+         cwd = coalesce(ss.cwd, excluded.cwd)
+  returning 1
+),
+u as (
+  update relay.tickets x
+     set status = case when t.is_parent or :'status' = '' then x.status else nullif(:'status', '')::relay.status end,
+         need = case when t.is_parent or :'status' = '' then x.need
+                     when :'status' = 'waiting' then nullif(:'need', '') else null end,
+         next_step = coalesce(nullif(:'next', ''), x.next_step),
+         needs_wrapup = false,
+         session_ids = case when :'sid' = any (x.session_ids) then x.session_ids else x.session_ids || :'sid'::text end,
+         updated_by = :'by'
+    from t where x.id = t.id
+  returning x.display_key, x.status
+)
+select json_build_object('key', (select display_key from u), 'status', (select status from u),
+                         'parent', (select is_parent from t), 'session', (select count(*) from s))
+"""
+
+SQL_SESSION = """
+insert into relay.sessions as ss (ticket_id, session_id, machine, cwd, summary, open_items, commits, prs)
+values (:'tid'::uuid, :'sid', :'machine', :'cwd', nullif(:'summary', ''), nullif(:'open', ''),
+        array(select json_array_elements_text(:'commits'::json)),
+        array(select json_array_elements_text(:'prs'::json)))
+on conflict (ticket_id, session_id) do update
+   set summary = case when excluded.summary is null then ss.summary
+                      when coalesce(ss.summary, '') = '' then excluded.summary
+                      else ss.summary || E'\\n' || excluded.summary end,
+       open_items = coalesce(excluded.open_items, ss.open_items),
+       commits = array(select distinct unnest(ss.commits || excluded.commits)),
+       prs = array(select distinct unnest(ss.prs || excluded.prs))
+returning json_build_object('ok', true)
+"""
+
+SQL_NOTE = """
+insert into relay.events (ticket_id, actor, kind, body)
+values (:'tid'::uuid, :'by', 'note', :'body')
+returning json_build_object('at', to_char(at at time zone :'tz', 'YYYY-MM-DD HH24:MI'))
+"""
+
+SQL_BRIEF = """
+update relay.tickets set brief = :'brief', next_step = coalesce(nullif(:'next', ''), next_step), updated_by = :'by'
+ where id = :'tid'::uuid
+returning json_build_object('key', display_key, 'length', length(brief))
+"""
+
+SQL_LINK = """
+with u as (
+  update relay.tickets set links = case when :'url' = '' then links - :'name'::text
+                                        else links || jsonb_build_object(:'name'::text, :'url'::text) end,
+                           updated_by = :'by'
+   where id = :'tid'::uuid
+  returning id, display_key, links
+),
+e as (insert into relay.events (ticket_id, actor, kind, body)
+      select id, :'by', 'link', :'name' || ': ' || coalesce(nullif(:'url', ''), '(removed)') from u returning 1)
+select json_build_object('key', (select display_key from u), 'links', (select links from u),
+                         'event', (select count(*) from e))
+"""
+
+SQL_DOC = """
+insert into relay.ticket_docs as d (ticket_id, path, label)
+values (:'tid'::uuid, :'path', nullif(:'label', ''))
+on conflict (ticket_id, path) do update set label = coalesce(excluded.label, d.label)
+returning json_build_object('path', path)
+"""
+
+SQL_ARCHIVE = """
+with u as (
+  update relay.tickets set archived_at = case when :'undo' = '1' then null else coalesce(archived_at, now()) end,
+                           updated_by = :'by'
+   where id = :'tid'::uuid
+  returning id, display_key, archived_at
+),
+e as (insert into relay.events (ticket_id, actor, kind, body)
+      select id, :'by', 'archive', case when :'undo' = '1' then 'unarchived' else 'archived' end from u
+      returning 1)
+select json_build_object('key', (select display_key from u),
+                         'archived', (select archived_at is not null from u), 'event', (select count(*) from e))
+"""
+
+SQL_NOTES = """
+with n as (
+  update relay.events e set seen_at = now()
+   where e.ticket_id = any (:'ids'::uuid[]) and e.kind = 'note' and e.actor = 'adam' and e.seen_at is null
+  returning e.id, e.ticket_id, e.at, e.body
+)
+select coalesce(json_agg(json_build_object('key', t.display_key, 'body', n.body,
+         'at', to_char(n.at at time zone :'tz', 'DD Mon HH24:MI')) order by n.at), '[]')
+  from n join relay.tickets t on t.id = n.ticket_id
+"""
+
+SQL_SESSION_END = """
+with u as (
+  update relay.tickets set needs_wrapup = true, updated_by = 'hook:session-end'
+   where id = :'tid'::uuid
+  returning id
+),
+e as (
+  insert into relay.events (ticket_id, actor, kind, body)
+  select id, 'hook:session-end', 'note', :'body' from u
+  returning 1
+),
+s as (
+  insert into relay.sessions as ss (ticket_id, session_id, machine, cwd, ended_at, closed_by)
+  select id, :'sid', :'machine', :'cwd', :'at'::timestamptz, 'session-end' from u
+  on conflict (ticket_id, session_id) do update
+     set ended_at = excluded.ended_at, closed_by = coalesce(ss.closed_by, 'session-end')
+  returning 1
+)
+select json_build_object('ticket', (select count(*) from u), 'event', (select count(*) from e),
+                         'session', (select count(*) from s))
+"""
+
+
+def common_vars(sid=None, cwd=None):
+    return {"tz": TZ, "sid": sid or "", "by": actor(sid), "machine": socket.gethostname(),
+            "cwd": cwd or os.getcwd()}
+
+
+# ---------------------------------------------------------------------------
+# Flushing the queue
+# ---------------------------------------------------------------------------
+
+def _log_files_sql(n):
+    rows = ", ".join("(:'t%d', :'p%d', :'k%d', :'s%d', :'a%d')" % (i, i, i, i, i) for i in range(n))
+    return ("select json_build_object('n', count(*)) from (values %s) v(t, p, k, s, a), "
+            "lateral relay.log_file(v.t::uuid, v.p, v.k, nullif(v.s, ''), v.a::timestamptz) f" % rows)
+
+
+def _send_files(batch):
+    variables = {}
+    for i, (name, tid, job) in enumerate(batch):
+        variables.update({"t%d" % i: tid, "p%d" % i: job.get("path"), "k%d" % i: job.get("kind") or "shell",
+                          "s%d" % i: job.get("session") or "", "a%d" % i: job.get("at") or now_iso()})
+    q(_log_files_sql(len(batch)), variables)
+
+
+def flush(raise_errors=False):
+    """Send queued jobs to Relay. Returns (sent, kept). Keeps everything on a
+    network failure; drops a job the database rejects (it would never succeed)."""
+    sent = kept = 0
+    with QueueLock() as lock:
+        if not lock.acquired:
+            return 0, -1
+        jobs = queue_jobs()
+        if not jobs:
+            return 0, 0
+        sids = set(j.get("session") for _, j in jobs)
+        states = dict((s, load_state(s)) for s in sids if s)
+        files, ends, drop = plan_flush(jobs, states)
+        ack(drop)
+        kept = len(jobs) - len(files) - len(ends) - len(drop)
+        try:
+            for i in range(0, len(files), 100):
+                batch = files[i:i + 100]
+                try:
+                    _send_files(batch)
+                    ack([b[0] for b in batch])
+                    sent += len(batch)
+                except DBError as e:
+                    if not e.sqlstate:
+                        raise
+                    for one in batch:  # find and drop the job the database rejects
+                        try:
+                            _send_files([one])
+                            sent += 1
+                        except DBError as e2:
+                            if not e2.sqlstate:
+                                raise
+                            log("flush: dropped %s (%s %s)" % (one[2].get("path"), e2.sqlstate, e2))
+                        ack([one[0]])
+            for name, st, job in ends:
+                cur = current_ticket(st)
+                v = common_vars(job.get("session"), job.get("cwd"))
+                v.update({"tid": cur["id"], "body": session_end_note(job), "at": job.get("at") or now_iso()})
+                try:
+                    q(SQL_SESSION_END, v)
+                    sent += 1
+                except DBError as e:
+                    if not e.sqlstate:
+                        raise
+                    log("flush: session_end for %s dropped (%s %s)" % (job.get("session"), e.sqlstate, e))
+                ack([name])
+                update_state(job.get("session"), lambda s: s.update({"ended": True}))
+        except DBError as e:
+            log("flush: kept queue (%s)" % e)
+            if raise_errors:
+                raise
+            kept += len(queue_jobs())
+    return sent, kept
+
+
+def session_end_note(job):
+    msg = (job.get("last_message") or "").strip()
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n[…]"
+    head = "Session %s ended without /close (%s)." % (job.get("session"), job.get("reason") or "exit")
+    return head + ("\n\nLast message:\n\n" + msg if msg else "\n\nNo last message was found in the transcript.")
+
+
+def prune_sessions():
+    cutoff = time.time() - SESSION_TTL
+    d = sdir("sessions")
+    for n in os.listdir(d):
+        p = os.path.join(d, n)
+        try:
+            if os.path.getmtime(p) < cutoff:
+                os.unlink(p)
+        except OSError:
+            pass
+
+
+def spawn_bg(args):
+    """Start `relay hook bg ...` fully detached, so it outlives the hook and the session."""
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "hook", "bg"] + args,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except Exception as e:
+        log("spawn_bg: %s" % e)
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+def label(status):
+    return LABELS.get(status, status or "?")
+
+
+def ticket_line(t):
+    s = "%s [%s] %s" % (t["key"], label(t["status"]), t["title"])
+    if t.get("children"):
+        s += " (parent: %d/%d phases done)" % (t.get("children_done") or 0, t["children"])
+    if t.get("status") == "waiting" and t.get("need"):
+        s += " · need: " + t["need"]
+    if t.get("needs_wrapup"):
+        s += " · CLOSED WITHOUT WRAP-UP"
+    return s
+
+
+def order_tree(tickets):
+    """Parents followed by their own children, children indented."""
+    by_parent = {}
+    for t in tickets:
+        if t.get("parent_id"):
+            by_parent.setdefault(t["parent_id"], []).append(t)
+    ids = set(t["id"] for t in tickets)
+    out = []
+    for t in tickets:
+        if t.get("parent_id") and t["parent_id"] in ids:
+            continue
+        out.append(("", t))
+        for c in by_parent.get(t["id"], []):
+            out.append(("  ", c))
+    return out
+
+
+def format_context(data, cwd, sid=None, st=None, cap=CONTEXT_CAP):
+    projects = data.get("projects") or []
+    tickets = data.get("tickets") or []
+    proj, matched = project_for(cwd, projects)
+    pkey = (proj or {}).get("key")
+    lines = ["# Relay (Adam's projects board)"]
+    if matched:
+        lines.append("This folder belongs to project %s (%s)." % (pkey, proj.get("name")))
+    else:
+        lines.append("This folder matches no Relay project; a new ticket goes to %s (Inbox) "
+                     "unless the work is for a named app (`relay create --project KEY`)." % (pkey or "INB"))
+    cur = current_ticket(st or {})
+    if cur:
+        lines.append("This session is attached to %s." % cur.get("key"))
+    wrap = [t for t in tickets if t.get("needs_wrapup") and
+            (t.get("project") == pkey and matched or (t.get("last_cwd") and path_under(t["last_cwd"], cwd)))]
+    if wrap:
+        lines.append("")
+        lines.append("## Closed without wrap-up — raise these with Adam first")
+        for t in wrap:
+            lines.append("- %s \"%s\" (%s), last session ended %s. Ask: \"%s was closed without wrap-up. "
+                         "Mark it done, or carry on?\"" % (t["key"], t["title"], label(t["status"]),
+                                                           t.get("ended") or "?", t["key"]))
+    open_here = [t for t in tickets if t.get("project") == pkey and t.get("status") != "done"]
+    lines.append("")
+    if open_here:
+        lines.append("## Open tickets in %s" % pkey)
+        shown = order_tree(open_here)
+        for ind, t in shown[:30]:
+            lines.append("%s- %s" % (ind, ticket_line(t)))
+        if len(shown) > 30:
+            lines.append("- … and %d more (`relay find --project %s ''`)" % (len(shown) - 30, pkey))
+    else:
+        lines.append("## No open tickets in %s" % pkey)
+    waiting = [t for t in tickets if t.get("status") == "waiting" and t.get("project") != pkey]
+    if waiting:
+        lines.append("")
+        lines.append("## Waiting for Adam (other projects)")
+        for t in waiting[:20]:
+            lines.append("- %s %s · need: %s" % (t["key"], t["title"], t.get("need") or "?"))
+    lines.append("")
+    lines.append("## The ticket rule")
+    lines.append("Real work (changing files, publishing, a build or a phase) gets a Relay ticket as soon as "
+                 "it's clear, before planning or code: `relay find TEXT`, else `relay create \"title\"` "
+                 "(add `--parent KEY` for a phase); then `relay attach KEY`. Quick questions answered in the "
+                 "same session don't, unless they grow. \"Continue KEY.\" means `relay attach KEY` then "
+                 "`relay get KEY`. Update the brief (`relay brief`) and post a session entry (`relay session`) "
+                 "at each phase end, and finish with /close, /close later or /close wait. The relay skill "
+                 "has the details.")
+    text = "\n".join(lines)
+    if len(text) > cap:
+        text = text[:cap - 60] + "\n… (truncated; run `relay context` for the rest)"
+    return text
+
+
+def group_files(files, roots=None):
+    """{group folder: [file rows]}: by git repo when there is one, else by folder."""
+    groups = {}
+    for f in files:
+        root = repo_root(f["path"])
+        if not root:
+            root = os.path.dirname(f["path"])
+        groups.setdefault(root, []).append(f)
+    return groups
+
+
+def merge_files(rows):
+    """Merge rows for the same path (a parent shows its phases' files)."""
+    by = {}
+    for r in rows:
+        m = by.get(r["path"])
+        if not m:
+            by[r["path"]] = dict(r, kinds=list(r.get("kinds") or []))
+            continue
+        m["times"] = (m.get("times") or 0) + (r.get("times") or 0)
+        for k in r.get("kinds") or []:
+            if k not in m["kinds"]:
+                m["kinds"].append(k)
+        if (r.get("last_at") or "") > (m.get("last_at") or ""):
+            m["last"], m["last_at"] = r.get("last"), r.get("last_at")
+    return [by[k] for k in sorted(by)]
+
+
+def format_get(d, all_sessions=False):
+    t = d["ticket"]
+    out = []
+    out.append("# %s · %s" % (t["key"], t["title"]))
+    meta = "Project %s (%s) · %s" % (t["project"], t["project_name"], label(t["status"]))
+    if d.get("parent"):
+        meta += " · phase %s of %s %s" % ("?" if t.get("phase") is None else t["phase"], d["parent"]["key"],
+                                           d["parent"]["title"])
+    if t.get("children"):
+        meta += " · parent of %d phases (status rolls up from them)" % t["children"]
+    meta += " · updated %s by %s" % (t.get("updated"), t.get("updated_by"))
+    out.append(meta)
+    if t.get("aliases"):
+        out.append("Also known as: " + ", ".join(t["aliases"]))
+    if t.get("jira_url"):
+        out.append("Jira: " + t["jira_url"])
+    if t.get("status") == "waiting" and t.get("need"):
+        out.append("Waiting for Adam: " + t["need"])
+    if t.get("next_step"):
+        out.append("Next step: " + t["next_step"])
+    if t.get("needs_wrapup"):
+        out.append("FLAG: closed without wrap-up. Ask Adam whether to mark it done or carry on.")
+    if t.get("archived"):
+        out.append("Archived %s." % t["archived"])
+    links = t.get("links") or {}
+    if links:
+        out.append("Links: " + " · ".join("%s %s" % (k, v) for k, v in sorted(links.items())))
+    notes = d.get("new_notes") or []
+    if notes:
+        out.append("")
+        out.append("## New notes from Adam (now marked seen)")
+        for n in notes:
+            out.append("- %s %s: %s" % (n["key"], n["at"], n["body"]))
+    if d.get("parent"):
+        out.append("")
+        out.append("## Parent plan: %s %s" % (d["parent"]["key"], d["parent"]["title"]))
+        out.append(d["parent"].get("brief") or "(no plan yet)")
+    phases = d.get("phases") or []
+    if phases:
+        out.append("")
+        out.append("## Phases")
+        for p in phases:
+            mark = " ← this ticket" if p["key"] == t["key"] else ""
+            ph = p.get("phase")
+            line = "%s. %s %s — %s%s" % ("-" if ph is None else ph, p["key"], p["title"], label(p["status"]), mark)
+            if p.get("status") == "waiting" and p.get("need"):
+                line += " (need: %s)" % p["need"]
+            if p.get("archived"):
+                line += " (archived)"
+            out.append(line)
+    out.append("")
+    out.append("## %s" % ("Plan" if t.get("children") else "Brief"))
+    out.append(t.get("brief") or "(empty: write one with `relay brief`)")
+    sessions = d.get("sessions") or []
+    out.append("")
+    shown = sessions if all_sessions else sessions[:3]
+    if not sessions:
+        out.append("## Sessions (none yet)")
+    elif all_sessions or len(sessions) <= 3:
+        out.append("## Sessions (%d)" % len(sessions))
+    else:
+        out.append("## Sessions (last 3 of %d; --all for every one)" % len(sessions))
+    for s in shown:
+        head = "- %s → %s · %s" % (s.get("started"), s.get("ended") or "open", s.get("session_id"))
+        if s.get("closed_by"):
+            head += " · closed by " + s["closed_by"]
+        if s.get("cwd"):
+            head += " · " + s["cwd"]
+        out.append(head)
+        if s.get("summary"):
+            out.append("  Summary: " + s["summary"].replace("\n", "\n  "))
+        if s.get("open_items"):
+            out.append("  Open: " + s["open_items"].replace("\n", "\n  "))
+        if s.get("commits"):
+            out.append("  Commits: " + ", ".join(s["commits"]))
+        if s.get("prs"):
+            out.append("  PRs: " + ", ".join(s["prs"]))
+    files = merge_files(d.get("files") or [])
+    out.append("")
+    out.append("## Files (%d)" % len(files))
+    for root, rows in sorted(group_files(files).items()):
+        out.append(root + "/")
+        for f in rows:
+            rel = os.path.relpath(f["path"], root)
+            out.append("  %s — %s ×%d · %s" % (rel, ", ".join(f.get("kinds") or []) or "?",
+                                              f.get("times") or 1, f.get("last")))
+    docs = d.get("docs") or []
+    if docs:
+        out.append("")
+        out.append("## Docs")
+        for doc in docs:
+            out.append("- %s%s" % (doc["path"], " (%s)" % doc["label"] if doc.get("label") else ""))
+    events = d.get("events") or []
+    if events:
+        out.append("")
+        out.append("## Recent activity")
+        for e in events:
+            if e["kind"] == "status":
+                body = "%s → %s" % (label(e.get("from")), label(e.get("to")))
+            else:
+                body = (e.get("body") or "").replace("\n", " ")
+                if len(body) > 300:
+                    body = body[:300] + "…"
+            seen = ""
+            if e["kind"] == "note" and e["actor"] == "adam":
+                seen = " ✓ seen" if e.get("seen") else " (not picked up yet)"
+            out.append("- %s %s %s: %s%s" % (e["at"], e["actor"], e["kind"], body, seen))
+    return "\n".join(out)
+
+
+def format_notes(notes):
+    if not notes:
+        return ""
+    lines = ["# Relay: new note%s from Adam" % ("s" if len(notes) > 1 else "")]
+    for n in notes:
+        lines.append("- %s (%s): %s" % (n["key"], n["at"], n["body"]))
+    lines.append("Adam wrote this in Relay while the session was running. Take it into account now; "
+                 "if it changes the plan, say so and update the brief.")
+    return "\n".join(lines)
+
+
+def hook_json(event, text):
+    return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text[:CONTEXT_CAP]}})
+
+
+# ---------------------------------------------------------------------------
+# Ticket helpers
+# ---------------------------------------------------------------------------
+
+def norm_key(key):
+    k = (key or "").strip().upper().rstrip(".")
+    if not KEY_RE.match(k):
+        raise RelayError("%r is not a ticket ID (like RLY-5 or WEB-R12)" % key)
+    return k
+
+
+def resolve(key):
+    t = q(SQL_RESOLVE, {"key": norm_key(key)})
+    if not t:
+        raise RelayError("no ticket %s" % norm_key(key))
+    return t
+
+
+def target(args, sid):
+    """The ticket a command acts on: --key, else this session's current ticket."""
+    key = getattr(args, "key", None)
+    if key:
+        return resolve(key)
+    cur = current_ticket(load_state(sid))
+    if not cur:
+        raise RelayError("no ticket attached to this session: pass --key KEY or run `relay attach KEY`")
+    return cur
+
+
+def remember(sid, ticket, cwd=None):
+    """Record session -> ticket locally (the current ticket is the last one attached)."""
+    def put(s):
+        lst = [x for x in (s.get("tickets") or []) if x.get("id") != ticket["id"]]
+        lst.append({"id": ticket["id"], "key": ticket["key"], "at": time.time()})
+        s["tickets"] = lst
+        s.setdefault("cwd", cwd or os.getcwd())
+        s.pop("ended", None)
+    return update_state(sid, put)
+
+
+def read_text_arg(value, label_):
+    if value == "-":
+        data = sys.stdin.read()
+        if not data.strip():
+            raise RelayError("%s: nothing on stdin" % label_)
+        return data
+    return value
+
+
+def do_attach(key, sid, cwd):
+    v = common_vars(sid, cwd)
+    v["key"] = norm_key(key)
+    t = q(SQL_ATTACH, v)
+    if not t:
+        raise RelayError("no ticket %s" % v["key"])
+    remember(sid, t, cwd)
+    roots = snapshot_targets(cwd, project={"key": t.get("project"), "paths": t.get("project_paths") or []})
+    add_snapshots(sid, roots)
+    return t
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_context(args):
+    cwd = norm(args.cwd or os.getcwd())
+    sid = session_id(args)
+    print(format_context(q(SQL_CONTEXT, {"tz": TZ}) or {}, cwd, sid, load_state(sid), cap=10 ** 9))
+
+
+def cmd_find(args):
+    rows = q(SQL_FIND, {"q": " ".join(args.text), "all": "1" if args.all else "",
+                        "proj": (args.project or "").upper()})
+    if not rows:
+        print("No tickets match.")
+        return
+    for r in rows:
+        line = "%s [%s] %s · %s" % (r["key"], label(r["status"]), r["title"], r["project"])
+        if r.get("parent"):
+            line += " · phase of " + r["parent"]
+        if r.get("archived"):
+            line += " · archived"
+        print(line)
+
+
+def cmd_get(args):
+    sid = session_id(args)
+    v = {"key": norm_key(args.key), "tz": TZ, "mark": "1" if sid and not args.peek else ""}
+    d = q(SQL_GET, v)
+    if not d or not d.get("ticket"):
+        raise RelayError("no ticket %s" % v["key"])
+    print(format_get(d, args.all))
+
+
+def cmd_create(args):
+    sid = session_id(args)
+    cwd = norm(os.getcwd())
+    status = args.status or "progress"
+    if status == "waiting" and not args.need:
+        raise RelayError("a waiting ticket needs --need \"what you need from Adam\"")
+    parent = resolve(args.parent) if args.parent else None
+    if parent and parent.get("parent_id"):
+        raise RelayError("%s is a phase itself and can't have phases" % parent["key"])
+    projects = q(SQL_PROJECTS) or []
+    if args.project:
+        proj = next((p for p in projects if p["key"] == args.project.upper()), None)
+        if not proj:
+            raise RelayError("no project %s" % args.project.upper())
+        if parent and parent["project_id"] != proj["id"]:
+            raise RelayError("a phase must be in its parent's project")
+    elif parent:
+        proj = next(p for p in projects if p["id"] == parent["project_id"])
+    else:
+        proj, _ = project_for(cwd, projects)
+    attach = sid and not args.no_attach
+    v = common_vars(sid if attach else "", cwd)
+    v["by"] = actor(sid)
+    brief = read_text_arg(args.brief, "--brief") if args.brief else ""
+    v.update({"project_id": proj["id"], "title": args.title, "status": status, "need": args.need or "",
+              "brief": brief, "next": args.next_step or "", "parent_id": (parent or {}).get("id", ""),
+              "phase": str(args.phase) if args.phase is not None else ""})
+    r = q(SQL_CREATE, v)
+    msg = "Created %s in %s" % (r["key"], proj["key"])
+    if parent:
+        msg += " as phase %s of %s" % (r.get("phase"), parent["key"])
+    if attach:
+        remember(sid, {"id": r["id"], "key": r["key"]}, cwd)
+        add_snapshots(sid, snapshot_targets(cwd, project=proj))
+        msg += "; attached to this session"
+    print(msg + ".")
+
+
+def cmd_attach(args):
+    sid = session_id(args)
+    if not sid:
+        raise RelayError("no session id: run inside Claude Code, or pass --session")
+    cwd = norm(os.getcwd())
+    t = do_attach(args.key, sid, cwd)
+    sent, kept = flush()
+    print("Attached %s \"%s\" (%s) to session %s.%s" % (
+        t["key"], t["title"], label(t["status"]), sid, " Logged %d queued file change(s)." % sent if sent else ""))
+
+
+def cmd_note(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "body": read_text_arg(" ".join(args.text), "note")})
+    r = q(SQL_NOTE, v)
+    print("Note added to %s at %s." % (t["key"], r["at"]))
+
+
+def cmd_brief(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    text = sys.stdin.read()
+    if not text.strip():
+        raise RelayError("brief: pipe the new brief in on stdin")
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "brief": text.strip() + "\n", "next": args.next_step or ""})
+    r = q(SQL_BRIEF, v)
+    print("Brief of %s updated (%d characters)." % (r["key"], r["length"]))
+
+
+def cmd_session(args):
+    sid = session_id(args)
+    if not sid:
+        raise RelayError("no session id: run inside Claude Code, or pass --session")
+    t = target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "summary": read_text_arg(args.summary or "", "--summary"),
+              "open": args.open_items or "", "commits": json.dumps(args.commit or []),
+              "prs": json.dumps(args.pr or [])})
+    q(SQL_SESSION, v)
+    sent, kept = flush()
+    print("Session entry for %s posted.%s" % (t["key"], " Logged %d file change(s)." % sent if sent else ""))
+
+
+def set_status(args, status, need=None):
+    sid = session_id(args)
+    t = target(args, sid)
+    if status == "waiting" and not (need or "").strip():
+        raise RelayError("waiting needs the one-line need: relay wait \"what you need from Adam\"")
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "status": status, "need": need or "", "next": getattr(args, "next_step", None) or ""})
+    r = q(SQL_STATUS, v)
+    if r.get("parent"):
+        raise RelayError("%s is a parent: its status comes from its phases. Move a phase instead." % t["key"])
+    print("%s → %s." % (r["key"], label(r["status"])))
+
+
+def cmd_status(args):
+    if args.status not in STATUSES:
+        raise RelayError("status must be one of: " + ", ".join(STATUSES))
+    set_status(args, args.status, args.need)
+
+
+def cmd_wait(args):
+    set_status(args, "waiting", " ".join(args.need))
+
+
+def cmd_done(args):
+    set_status(args, "done")
+
+
+def cmd_later(args):
+    set_status(args, "next")
+
+
+def cmd_archive(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "undo": "1" if args.undo else ""})
+    r = q(SQL_ARCHIVE, v)
+    print("%s %s." % (r["key"], "archived" if r["archived"] else "unarchived"))
+
+
+def cmd_link(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "name": args.name, "url": args.url or ""})
+    r = q(SQL_LINK, v)
+    print("%s links: %s" % (r["key"], json.dumps(r["links"])))
+
+
+def cmd_doc(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    path = norm(os.path.abspath(os.path.expanduser(args.path)))
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "path": path, "label": args.label or ""})
+    q(SQL_DOC, v)
+    print("Doc %s added to %s." % (path, t["key"]))
+
+
+def cmd_file(args):
+    sid = session_id(args)
+    t = target(args, sid) if (args.key or sid) else None
+    if not t:
+        raise RelayError("no ticket: pass --key KEY or attach one first")
+    for p in args.path:
+        path = norm(os.path.abspath(os.path.expanduser(p)))
+        enqueue({"type": "file", "session": sid, "path": path, "kind": args.kind, "at": now_iso(),
+                 "ticket_id": t["id"]})
+    sent, kept = flush(raise_errors=True)
+    print("Logged %d file(s) on %s as %s." % (len(args.path), t["key"], args.kind))
+
+
+def cmd_notes(args):
+    sid = session_id(args)
+    st = load_state(sid)
+    ids = [x["id"] for x in st.get("tickets") or []]
+    if args.key:
+        ids = [resolve(args.key)["id"]]
+    if not ids:
+        raise RelayError("no ticket attached to this session")
+    notes = q(SQL_NOTES, {"ids": "{%s}" % ",".join(ids), "tz": TZ}) or []
+    print(format_notes(notes) or "No new notes.")
+
+
+def cmd_sweep(args):
+    sid = session_id(args)
+    if not sid:
+        raise RelayError("no session id")
+    found = do_sweep(sid)
+    sent, kept = flush(raise_errors=True)
+    if found:
+        print("Swept %d shell-changed file(s):\n%s" % (len(found), "\n".join("  " + p for p in found)))
+    else:
+        print("Sweep found no shell-changed files.")
+
+
+def cmd_flush(args):
+    sent, kept = flush(raise_errors=True)
+    print("Sent %d; %s." % (sent, "another flush is running" if kept < 0 else "%d waiting for a ticket" % kept))
+
+
+def cmd_close(args):
+    sid = session_id(args)
+    if not sid:
+        raise RelayError("no session id: run inside Claude Code, or pass --session")
+    t = target(args, sid)
+    status = {"done": "done", "later": "next", "wait": "waiting"}[args.how]
+    if status == "waiting" and not (args.need or "").strip():
+        raise RelayError("/close wait needs the one-line need: --need \"what you need from Adam\"")
+    found = do_sweep(sid)
+    flush(raise_errors=True)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "status": status, "need": args.need or "", "next": args.next_step or "",
+              "summary": read_text_arg(args.summary or "", "--summary"), "open": args.open_items or "",
+              "commits": json.dumps(args.commit or []), "prs": json.dumps(args.pr or []),
+              "closed_by": {"done": "close", "later": "close-later", "wait": "close-wait"}[args.how]})
+    r = q(SQL_CLOSE, v)
+    update_state(sid, lambda s: s.update({"closed": True, "closed_at": time.time()}))
+    if r.get("parent"):
+        print("%s is a parent, so its status stays %s (it rolls up from its phases). Session entry posted." % (
+            r["key"], label(r["status"])))
+    else:
+        print("%s → %s. Session entry posted%s." % (r["key"], label(r["status"]),
+                                                   ", %d shell-changed file(s) swept" % len(found) if found else ""))
+
+
+def conninfo_fields():
+    d = {}
+    for tok in shlex.split(os.environ.get("RELAY_CONNINFO", CONNINFO_DEFAULT)):
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            d[k] = v
+    return d
+
+
+PGPASS_LINE = "aws-0-eu-central-1.pooler.supabase.com:5432:postgres:claude_relay.nxekrfdagkdwhjuunsrl:<password>"
+
+
+def pgpass_entry(path, host, port, db, user):
+    """(found, detail) for a ~/.pgpass line psql would use for this connection."""
+    try:
+        st = os.stat(path)
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False, "%s doesn't exist" % path
+    want = [host, port, db, user]
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = re.split(r"(?<!\\):", line, 4)
+        if len(parts) == 5 and all(a == "*" or a == b for a, b in zip(parts[:4], want)) and parts[4]:
+            if st.st_mode & 0o077:
+                return False, "%s has the entry but psql ignores it: run chmod 600 %s" % (path, path)
+            return True, "%s has an entry for %s (mode 600)" % (path, user)
+    return False, "no line for %s in %s" % (user, path)
+
+
+MANAGED_DIR = "/Library/Application Support/ClaudeCode"
+MDM_DOMAIN = "com.anthropic.claudecode"
+SKILLS = ("relay", "close", "relay-close", "relay-tickets")
+
+
+def policy_problems(settings, managed=True):
+    """Plain-English reasons a settings object stops Relay's user-level hooks or skills."""
+    out = []
+    if not isinstance(settings, dict):
+        return out
+    if settings.get("disableAllHooks") is True:
+        out.append("disableAllHooks: true turns every hook off, Relay's included" +
+                   (" (only an admin can change managed settings)" if managed else
+                    ": remove it from your settings.json"))
+    if managed and settings.get("allowManagedHooksOnly") is True:
+        out.append("allowManagedHooksOnly: true runs only the organisation's hooks, so Relay's hooks in "
+                   "~/.claude/settings.json are skipped")
+    spo = settings.get("strictPluginOnlyCustomization") if managed else None
+    if spo is True or (isinstance(spo, list) and ({"hooks", "skills"} & set(spo))):
+        what = "hooks and skills" if spo is True or {"hooks", "skills"} <= set(spo) else \
+            ("hooks" if "hooks" in spo else "skills")
+        out.append("strictPluginOnlyCustomization (%s) allows %s only from plugins, so Relay's user-level %s "
+                   "are skipped" % (json.dumps(spo), what, what))
+    return out
+
+
+def managed_sources(managed_dir=None):
+    """[(label, settings dict or None, error)] for the local managed-settings sources:
+    managed-settings.json, managed-settings.d/*.json and the MDM domain."""
+    d = managed_dir or os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
+    files = [os.path.join(d, "managed-settings.json")]
+    try:
+        files += sorted(os.path.join(d, "managed-settings.d", n) for n in os.listdir(os.path.join(d, "managed-settings.d"))
+                        if n.endswith(".json"))
+    except OSError:
+        pass
+    out = []
+    for f in files:
+        if not os.path.exists(f):
+            continue
+        try:
+            with open(f) as fh:
+                out.append((f, json.load(fh), None))
+        except (OSError, ValueError) as e:
+            out.append((f, None, "can't be read or parsed (%s)" % e.__class__.__name__))
+    if managed_dir is None and not os.environ.get("RELAY_MANAGED_DIR"):
+        import plistlib
+        for plist in ("/Library/Managed Preferences/%s.plist" % MDM_DOMAIN,
+                      os.path.expanduser("~/Library/Managed Preferences/%s.plist" % MDM_DOMAIN)):
+            if os.path.exists(plist):
+                try:
+                    with open(plist, "rb") as fh:
+                        out.append(("MDM " + plist, plistlib.load(fh), None))
+                except Exception as e:
+                    out.append(("MDM " + plist, None, "can't be read (%s)" % e.__class__.__name__))
+        try:
+            r = subprocess.run(["defaults", "export", MDM_DOMAIN, "-"], capture_output=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                data = plistlib.loads(r.stdout)
+                if data:
+                    out.append(("defaults domain " + MDM_DOMAIN, data, None))
+        except Exception:
+            pass
+    return out
+
+
+def cmd_doctor(args):
+    """One PASS/FAIL line per check; exit 1 if any fails."""
+    sid = session_id(args)
+    claude = norm(os.environ.get("CLAUDE_DIR") or os.path.expanduser("~/.claude"))
+    bin_path = os.path.join(home(), "bin", "relay")
+    fails = []
+
+    def check(name, ok, detail):
+        print("%s  %-10s %s" % ("PASS" if ok else "FAIL", name, detail))
+        if not ok:
+            fails.append(name)
+
+    print("relay %s at %s · state %s" % (VERSION, os.path.abspath(__file__), home()))
+    try:
+        exe = find_psql()
+        ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
+        check("psql", True, "%s (%s)" % (exe, ver))
+    except Exception:
+        check("psql", False, "not found. Install it: brew install libpq && brew link --force libpq")
+    ci = conninfo_fields()
+    host, port, db, user = ci.get("host", ""), ci.get("port", "5432"), ci.get("dbname", ""), ci.get("user", "")
+    pgpass = os.environ.get("PGPASSFILE") or os.path.expanduser("~/.pgpass")
+    ok, detail = pgpass_entry(pgpass, host, port, db, user)
+    if not ok and "chmod" not in detail:
+        detail += ". Add this line (your password in place of <password>), then chmod 600 %s:\n" \
+                  "                 %s" % (pgpass, PGPASS_LINE)
+    check("pgpass", ok, detail)
+    tcp = False
+    t0 = time.time()
+    try:
+        socket.create_connection((host, int(port)), timeout=3).close()
+        tcp = True
+        check("network", True, "TCP to %s:%s in %.2fs" % (host, port, time.time() - t0))
+    except Exception as e:
+        check("network", False, "can't open a TCP connection to %s:%s within 3 s (%s). Corporate networks often "
+              "block outbound port %s: try another network (a phone hotspot) or ask IT to allow it." % (
+                  host, port, e.__class__.__name__, port))
+    if tcp:
+        try:
+            u = q("select json_build_object('u', current_user)", timeout=8)
+            check("login", u.get("u") == "claude_relay", "signed in as %s" % u.get("u"))
+            try:
+                n = q("select json_build_object('n', (select count(*) from relay.projects))", timeout=8)
+                check("read", n["n"] > 0, "relay.projects has %d rows" % n["n"])
+            except DBError as e:
+                check("read", False, explain_db(e))
+        except DBError as e:
+            check("login", False, explain_db(e))
+            check("read", False, "skipped (no login)")
+    else:
+        check("login", False, "skipped (no network)")
+        check("read", False, "skipped (no network)")
+    check("binary", os.access(bin_path, os.X_OK), bin_path + ("" if os.access(bin_path, os.X_OK) else " is missing: run cli/install.sh"))
+    try:
+        with open(os.path.join(claude, "settings.json")) as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        settings = {}
+    missing = []
+    for event, matcher, entry, timeout in load_hook_spec():
+        want = "%s hook %s" % (shlex.quote(bin_path), entry)
+        found = any(h.get("command") == want and (g.get("matcher") or None) == matcher
+                    for g in (settings.get("hooks") or {}).get(event) or [] for h in g.get("hooks") or [])
+        if not found:
+            missing.append("%s%s" % (event, "(%s)" % matcher if matcher else ""))
+    check("hooks", not missing, "all %d in %s/settings.json" % (len(load_hook_spec()), claude) if not missing
+          else "missing: %s. Run cli/install.sh" % ", ".join(missing))
+    user_problems = policy_problems(settings, managed=False)
+    if user_problems:
+        check("hooks-on", False, "your %s/settings.json: %s" % (claude, "; ".join(user_problems)))
+    sources = managed_sources()
+    problems = []
+    for label, data, err in sources:
+        if err:
+            problems.append("%s %s" % (label, err))
+        for msg in policy_problems(data):
+            problems.append("%s: %s" % (label, msg))
+    if problems:
+        check("managed", False, "organisation settings stop Relay: " + " | ".join(problems) +
+              ". The CLI still works by hand (relay attach, notes, close), but nothing runs automatically.")
+    else:
+        check("managed", True, ("%d local managed source(s), none blocks user hooks or skills" % len(sources))
+              if sources else "no local managed settings (file, managed-settings.d or MDM)")
+    skills = [n for n in SKILLS if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
+    check("skills", not skills, "%s in %s/skills" % (", ".join(SKILLS), claude) if not skills
+          else "missing: %s. Run cli/install.sh" % ", ".join(skills))
+    md = os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
+    for name, alias in (("close", "/relay-close"), ("relay", "/relay-tickets")):
+        if os.path.exists(os.path.join(md, ".claude", "skills", name, "SKILL.md")):
+            print("warn  an organisation skill named %s takes /%s (managed skills win over personal ones): "
+                  "type %s instead" % (name, name, alias))
+    try:
+        with open(os.path.join(claude, "CLAUDE.md")) as f:
+            has_block = BLOCK_BEGIN in f.read()
+    except OSError:
+        has_block = False
+    check("rule", has_block, "ticket rule block in %s/CLAUDE.md" % claude if has_block
+          else "no Relay block in %s/CLAUDE.md. Run cli/install.sh" % claude)
+    overrides = local_paths()
+    print("info  paths.json: %s" % ("%d folder override(s)" % len(overrides) if overrides else "none"))
+    print("info  session: %s" % (sid or "(none: outside Claude Code)"))
+    st = load_state(sid)
+    if st:
+        print("info  attached: %s" % (", ".join(x["key"] for x in st.get("tickets") or []) or "nothing"))
+    print("info  queued jobs: %d" % len(queue_jobs()))
+    print("info  server-managed settings (claude.ai admin console) can't be read from here: inside Claude Code, "
+          "check /status (Setting sources) and `claude doctor` (Managed settings (remote))")
+    if fails:
+        print("%d check(s) failed: %s" % (len(fails), ", ".join(fails)))
+        return 1
+    print("All checks passed.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Hooks. Each one: read stdin JSON, stay inside its time box, print only
+# context on success, print nothing on failure, always exit 0.
+# ---------------------------------------------------------------------------
+
+def read_hook_input():
+    try:
+        data = sys.stdin.read()
+        return json.loads(data) if data.strip() else {}
+    except Exception:
+        return {}
+
+
+def hook_session_start(inp):
+    sid = inp.get("session_id") or ""
+    cwd = norm(inp.get("cwd") or os.getcwd())
+    env_file = os.environ.get("CLAUDE_ENV_FILE")
+    if env_file and sid:
+        try:
+            with open(env_file, "a") as f:
+                f.write("export RELAY_SESSION_ID=%s\n" % shlex.quote(sid))
+        except OSError:
+            pass
+    if sid:
+        def put(s):
+            s.setdefault("cwd", cwd)
+            s.setdefault("started_at", time.time())
+            s["source"] = inp.get("source")
+            s.pop("ended", None)  # a resumed session is live again
+        update_state(sid, put)
+        spawn_bg(["--session", sid, "--cwd", cwd, "--snapshot", "--flush"])
+    data = q(SQL_CONTEXT, {"tz": TZ}, timeout=remaining())
+    text = format_context(data or {}, cwd, sid, load_state(sid))
+    sys.stdout.write(hook_json("SessionStart", text))
+
+
+def hook_file(inp):
+    sid = inp.get("session_id") or ""
+    tool = inp.get("tool_name") or ""
+    ti = inp.get("tool_input") or {}
+    path = ti.get("file_path") or ti.get("notebook_path") or ""
+    if not sid or not path:
+        return
+    path = norm(path if os.path.isabs(path) else os.path.join(inp.get("cwd") or os.getcwd(), path))
+    scratch = inp.get("scratchpad_dir")
+    if scratch and path_under(path, scratch):
+        return
+    kind = "write" if tool == "Write" else "edit"
+    enqueue({"type": "file", "session": sid, "path": path, "kind": kind, "at": now_iso()})
+    with open(paths_file(sid), "a") as f:
+        f.write(path + "\n")
+
+
+def _check_file(sid):
+    return os.path.join(sdir("sessions"), safe_sid(sid) + ".check")
+
+
+def throttled(sid, every=NOTES_EVERY):
+    """True when the last check was less than `every` seconds ago (or we're backing off)."""
+    try:
+        return time.time() < os.stat(_check_file(sid)).st_mtime + every
+    except OSError:
+        return False
+
+
+def mark_checked(sid, backoff=0):
+    p = _check_file(sid)
+    with open(p, "a"):
+        pass
+    t = time.time() + backoff
+    os.utime(p, (t, t))
+
+
+def notes_for(st, timeout=None):
+    ids = [x["id"] for x in st.get("tickets") or []]
+    if not ids:
+        return []
+    return q(SQL_NOTES, {"ids": "{%s}" % ",".join(ids), "tz": TZ}, timeout=timeout) or []
+
+
+def hook_post_tool(inp):
+    sid = inp.get("session_id") or ""
+    if not sid or throttled(sid):
+        return
+    st = load_state(sid)
+    mark_checked(sid)
+    if not st.get("tickets"):
+        return
+    try:
+        notes = notes_for(st, timeout=remaining())
+    except DBError as e:
+        if not e.sqlstate:
+            mark_checked(sid, BACKOFF - NOTES_EVERY)
+        raise
+    if remaining() > 1.5:
+        # lazy snapshots for repos this session has started editing, then flush
+        roots = [r for r in set(repo_root(p) for p in logged_paths(sid)) if r]
+        add_snapshots(sid, roots)
+        try:
+            flush()
+        except Exception as e:
+            log("post-tool flush: %s" % e)
+    if notes:
+        sys.stdout.write(hook_json("PostToolUse", format_notes(notes)))
+
+
+def hook_prompt(inp):
+    sid = inp.get("session_id") or ""
+    if not sid:
+        return
+    cwd = norm(inp.get("cwd") or os.getcwd())
+    m = KICKOFF_RE.match(inp.get("prompt") or "")
+    st = load_state(sid)
+    parts = []
+    if m:
+        key = norm_key(m.group(1))
+        do_attach(key, sid, cwd)
+        st = load_state(sid)
+        d = q(SQL_GET, {"key": key, "tz": TZ, "mark": "1"}, timeout=remaining())
+        if d and d.get("ticket"):
+            parts.append("# Relay: this session is now attached to %s. Its handoff (relay get %s):\n\n%s"
+                         % (key, key, format_get(d)))
+    if st.get("tickets"):
+        notes = notes_for(st, timeout=remaining())
+        if notes:
+            parts.insert(0, format_notes(notes))
+        mark_checked(sid)
+    if parts:
+        text = "\n\n".join(parts)
+        if len(text) > CONTEXT_CAP:
+            text = text[:CONTEXT_CAP - 80] + "\n… (truncated; run `relay get %s`)" % (m.group(1).upper() if m else "KEY")
+        sys.stdout.write(hook_json("UserPromptSubmit", text))
+
+
+def hook_session_end(inp):
+    sid = inp.get("session_id") or ""
+    if not sid:
+        return
+    st = load_state(sid)
+    if st.get("tickets") and not st.get("closed"):
+        enqueue({"type": "session_end", "session": sid, "cwd": inp.get("cwd") or st.get("cwd"),
+                 "reason": inp.get("reason"), "at": now_iso(),
+                 "last_message": last_assistant_text(inp.get("transcript_path"))})
+    spawn_bg(["--session", sid, "--sweep", "--flush", "--ended"])
+
+
+def hook_bg(argv):
+    """The detached worker: snapshot, sweep and flush with a generous time box."""
+    p = argparse.ArgumentParser(prog="relay hook bg")
+    p.add_argument("--session", default="")
+    p.add_argument("--cwd", default="")
+    p.add_argument("--snapshot", action="store_true")
+    p.add_argument("--sweep", action="store_true")
+    p.add_argument("--flush", action="store_true")
+    p.add_argument("--ended", action="store_true")
+    a = p.parse_args(argv)
+    if a.snapshot and a.session:
+        projects = []
+        try:
+            projects = q(SQL_PROJECTS, timeout=10) or []
+        except DBError:
+            pass
+        proj, matched = project_for(a.cwd, projects) if projects else (None, False)
+        add_snapshots(a.session, snapshot_targets(a.cwd, project=proj if matched else None))
+    if a.sweep and a.session and current_ticket(load_state(a.session)):
+        do_sweep(a.session)
+    if a.ended and a.session and not current_ticket(load_state(a.session)):
+        update_state(a.session, lambda s: s.update({"ended": True}))
+    if a.flush:
+        flush()
+    prune_sessions()
+
+
+HOOKS = {
+    "session-start": (hook_session_start, 4.5),
+    "file": (hook_file, 1.5),
+    "post-tool": (hook_post_tool, 4.0),
+    "prompt": (hook_prompt, 6.0),
+    "session-end": (hook_session_end, 1.0),
+}
+
+
+def run_hook(argv):
+    event = argv[0] if argv else ""
+    if event == "bg":
+        start_timebox(60)
+        try:
+            hook_bg(argv[1:])
+        except BaseException as e:
+            log("hook bg: %r" % e)
+        return 0
+    fn, budget = HOOKS.get(event, (None, 0))
+    if not fn:
+        return 0
+    real_stdout = sys.stdout
+    try:
+        start_timebox(budget)
+        inp = read_hook_input()
+        buf = _Buffer()
+        sys.stdout = buf
+        fn(inp)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        sys.stdout = real_stdout
+        if buf.text:
+            real_stdout.write(buf.text)
+            real_stdout.flush()
+    except BaseException as e:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        except Exception:
+            pass
+        sys.stdout = real_stdout
+        log("hook %s: %s" % (event, "time box reached" if isinstance(e, TimeBox) else repr(e)))
+    return 0
+
+
+class _Buffer(object):
+    """Hook output is held back until the hook has finished, so a hook that
+    fails half-way prints nothing."""
+
+    def __init__(self):
+        self.text = ""
+
+    def write(self, s):
+        self.text += s
+
+    def flush(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Setup: merge hooks into settings.json, install skills and the CLAUDE.md rule
+# ---------------------------------------------------------------------------
+
+HOOK_SPEC = [
+    ("SessionStart", None, "session-start", 10),
+    ("UserPromptSubmit", None, "prompt", 10),
+    ("PostToolUse", "Write|Edit|NotebookEdit", "file", 5),
+    ("PostToolUse", "*", "post-tool", 10),
+    ("SessionEnd", None, "session-end", 10),
+]
+
+
+def load_hook_spec(src=None):
+    """The hooks Relay installs: cli/hooks.json next to the source (or the installed
+    copy next to the binary), else the built-in HOOK_SPEC."""
+    for d in [src, os.path.dirname(os.path.abspath(__file__))]:
+        if not d:
+            continue
+        try:
+            with open(os.path.join(d, "hooks.json")) as f:
+                rows = json.load(f)["hooks"]
+            return [(r["event"], r.get("matcher"), r["entry"], int(r["timeout"])) for r in rows]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return list(HOOK_SPEC)
+
+
+def is_relay_hook(h, bin_path):
+    cmd = (h or {}).get("command") or ""
+    return RELAY_MARK in cmd or (bin_path and bin_path in cmd)
+
+
+def merge_hooks(settings, bin_path, spec=None):
+    """Return a copy of settings with Relay's hooks in place. Other hooks and
+    keys are kept; earlier Relay hooks are replaced, so it is idempotent."""
+    s = json.loads(json.dumps(settings or {}))
+    hooks = s.get("hooks") or {}
+    for event in list(hooks):
+        groups = []
+        for g in hooks[event] or []:
+            kept = [h for h in g.get("hooks") or [] if not is_relay_hook(h, bin_path)]
+            if kept:
+                g = dict(g, hooks=kept)
+                groups.append(g)
+        if groups:
+            hooks[event] = groups
+        else:
+            del hooks[event]
+    for event, matcher, name, timeout in (spec or HOOK_SPEC):
+        g = {"hooks": [{"type": "command", "command": "%s hook %s" % (shlex.quote(bin_path), name),
+                        "timeout": timeout}]}
+        if matcher:
+            g = dict([("matcher", matcher)] + list(g.items()))
+        hooks.setdefault(event, []).append(g)
+    s["hooks"] = hooks
+    return s
+
+
+BLOCK_BEGIN = "<!-- relay:begin (managed by relay setup) -->"
+BLOCK_END = "<!-- relay:end -->"
+
+
+def merge_block(existing, block):
+    """Put block between the relay markers, replacing an earlier one."""
+    body = "%s\n%s\n%s\n" % (BLOCK_BEGIN, block.strip(), BLOCK_END)
+    existing = existing or ""
+    i, j = existing.find(BLOCK_BEGIN), existing.find(BLOCK_END)
+    if i >= 0 and j > i:
+        return existing[:i] + body + existing[j + len(BLOCK_END):].lstrip("\n")
+    if existing.strip():
+        return existing.rstrip("\n") + "\n\n" + body
+    return body
+
+
+def cmd_setup(args):
+    claude = norm(args.claude_dir)
+    src = norm(args.src)
+    bin_path = norm(args.bin)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    settings_path = os.path.join(claude, "settings.json")
+    real = os.path.realpath(settings_path)
+    try:
+        with open(real) as f:
+            raw = f.read()
+        settings = json.loads(raw) if raw.strip() else {}
+    except FileNotFoundError:
+        raw, settings = None, {}
+    merged = merge_hooks(settings, bin_path, load_hook_spec(src))
+    text = json.dumps(merged, indent=2) + "\n"
+    claude_md = os.path.join(claude, "CLAUDE.md")
+    try:
+        with open(claude_md) as f:
+            md_old = f.read()
+    except FileNotFoundError:
+        md_old = ""
+    with open(os.path.join(src, "claude-md-rule.md")) as f:
+        md_new = merge_block(md_old, f.read())
+    if args.dry_run:
+        print(text)
+        print(md_new)
+        return
+    for name in sorted(os.listdir(os.path.join(src, "skills"))):
+        if not os.path.isfile(os.path.join(src, "skills", name, "SKILL.md")):
+            continue
+        with open(os.path.join(src, "skills", name, "SKILL.md")) as f:
+            atomic_write(os.path.join(claude, "skills", name, "SKILL.md"), f.read())
+    with open(os.path.join(src, "hooks.json")) as f:  # beside the binary, for `relay doctor`
+        atomic_write(os.path.join(os.path.dirname(bin_path), "hooks.json"), f.read())
+    if md_new != md_old:
+        atomic_write(claude_md, md_new)
+    if raw is not None:
+        had = any(is_relay_hook(h, bin_path) for gs in (settings.get("hooks") or {}).values()
+                  for g in gs or [] for h in g.get("hooks") or [])
+        backup = os.path.join(claude, "backups", "settings.json.%s-%s" % (
+            "relay-reinstall" if had else "pre-relay", stamp))
+        os.makedirs(os.path.dirname(backup), exist_ok=True)
+        shutil.copy2(real, backup)
+        print("Backed up settings.json to %s" % backup)
+    mode = os.stat(real).st_mode & 0o777 if raw is not None else 0o644
+    atomic_write(real, text, mode)
+    print("Hooks merged into %s; skills %s and the CLAUDE.md rule installed." % (settings_path, ", ".join(SKILLS)))
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="relay", description="Relay: tickets for Claude Code sessions.")
+    p.add_argument("--version", action="version", version="relay " + VERSION)
+    sub = p.add_subparsers(dest="cmd")
+
+    def add(name, fn, help_):
+        sp = sub.add_parser(name, help=help_, description=help_)
+        sp.set_defaults(fn=fn)
+        sp.add_argument("--session", help="Claude Code session id (default: $RELAY_SESSION_ID / $CLAUDE_CODE_SESSION_ID)")
+        return sp
+
+    sp = add("context", cmd_context, "Open tickets for this folder's project, everything waiting, and the ticket rule.")
+    sp.add_argument("--cwd")
+    sp = add("find", cmd_find, "Find tickets by ID, alias, Jira key, title or brief text.")
+    sp.add_argument("text", nargs="+")
+    sp.add_argument("--all", action="store_true", help="include archived and long-done tickets")
+    sp.add_argument("--project")
+    sp = add("get", cmd_get, "Show a ticket's handoff: brief, sessions, files, docs, links, phases.")
+    sp.add_argument("key")
+    sp.add_argument("--all", action="store_true", help="every session, not just the last 3")
+    sp.add_argument("--peek", action="store_true", help="don't mark Adam's new notes as seen")
+    sp = add("create", cmd_create, "Create a ticket (attached to this session unless --no-attach).")
+    sp.add_argument("title")
+    sp.add_argument("--project", help="project key (default: from the folder, else INB)")
+    sp.add_argument("--parent", help="make it the next phase of this parent")
+    sp.add_argument("--phase", type=int, help="phase number (default: the parent's next)")
+    sp.add_argument("--status", choices=STATUSES, help="default: progress")
+    sp.add_argument("--need", help="required with --status waiting")
+    sp.add_argument("--brief", help="the brief, or - to read it from stdin")
+    sp.add_argument("--next-step")
+    sp.add_argument("--no-attach", action="store_true")
+    sp = add("attach", cmd_attach, "Attach this session to a ticket.")
+    sp.add_argument("key")
+    sp = add("note", cmd_note, "Add a note to the ticket's activity log (- reads stdin).")
+    sp.add_argument("text", nargs="+")
+    sp.add_argument("--key")
+    sp = add("brief", cmd_brief, "Replace the ticket's brief with stdin.")
+    sp.add_argument("--key")
+    sp.add_argument("--next-step")
+    sp = add("session", cmd_session, "Post (or add to) this session's entry on the ticket.")
+    sp.add_argument("--key")
+    sp.add_argument("--summary", help="what this session did (- reads stdin)")
+    sp.add_argument("--open-items")
+    sp.add_argument("--commit", action="append")
+    sp.add_argument("--pr", action="append")
+    sp = add("status", cmd_status, "Set the ticket's status.")
+    sp.add_argument("status")
+    sp.add_argument("--key")
+    sp.add_argument("--need")
+    sp.add_argument("--next-step")
+    sp = add("wait", cmd_wait, "Move the ticket to Waiting for me, with the one-line need.")
+    sp.add_argument("need", nargs="+")
+    sp.add_argument("--key")
+    sp = add("done", cmd_done, "Move the ticket to Done.")
+    sp.add_argument("--key")
+    sp = add("later", cmd_later, "Move the ticket to Up next.")
+    sp.add_argument("--key")
+    sp.add_argument("--next-step")
+    sp = add("archive", cmd_archive, "Archive the ticket (--undo to unarchive).")
+    sp.add_argument("--key")
+    sp.add_argument("--undo", action="store_true")
+    sp = add("link", cmd_link, "Set a link on the ticket (branch, pr, live, …); an empty URL removes it.")
+    sp.add_argument("name")
+    sp.add_argument("url", nargs="?", default="")
+    sp.add_argument("--key")
+    sp = add("doc", cmd_doc, "Add a reference document (a path on disk).")
+    sp.add_argument("path")
+    sp.add_argument("--label")
+    sp.add_argument("--key")
+    sp = add("file", cmd_file, "Log files changed outside Write/Edit (default kind: shell).")
+    sp.add_argument("path", nargs="+")
+    sp.add_argument("--kind", choices=("shell", "write", "edit"), default="shell")
+    sp.add_argument("--key")
+    sp = add("notes", cmd_notes, "Show Adam's unseen notes on the attached tickets, and mark them seen.")
+    sp.add_argument("--key")
+    sp = add("sweep", cmd_sweep, "Log git-changed files since the session's snapshot as shell edits.")
+    sp = add("flush", cmd_flush, "Send the local queue to Relay.")
+    sp = add("close", cmd_close, "End the session's work on the ticket: done, later or wait.")
+    sp.add_argument("how", choices=("done", "later", "wait"))
+    sp.add_argument("--key")
+    sp.add_argument("--summary", help="two lines on what was finished (- reads stdin)")
+    sp.add_argument("--open-items")
+    sp.add_argument("--need", help="required for wait")
+    sp.add_argument("--next-step", help="for later: the brief's next step")
+    sp.add_argument("--commit", action="append")
+    sp.add_argument("--pr", action="append")
+    sp = add("doctor", cmd_doctor, "Check psql, the database, this session and the queue.")
+    sp = add("setup", cmd_setup, "Install the hooks, skills and CLAUDE.md rule (used by install.sh).")
+    sp.add_argument("--src", required=True, help="the cli/ folder")
+    sp.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
+    sp.add_argument("--bin", default=os.path.join(home(), "bin", "relay"))
+    sp.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "hook":
+        return run_hook(argv[1:])
+    if not argv or argv[0] == "help":
+        build_parser().print_help()
+        return 0
+    args = build_parser().parse_args(argv)
+    if not getattr(args, "fn", None):
+        build_parser().print_help()
+        return 0
+    try:
+        return args.fn(args) or 0
+    except DBError as e:
+        sys.stderr.write("relay: %s\n" % explain_db(e))
+        return 1
+    except RelayError as e:
+        sys.stderr.write("relay: %s\n" % e)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

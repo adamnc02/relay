@@ -1,0 +1,10 @@
+{
+  "comment": "The hooks cli/install.sh merges into ~/.claude/settings.json. Each runs `<bin> hook <entry>`; timeout is in seconds. Edit here, then re-run cli/install.sh.",
+  "hooks": [
+    {"event": "SessionStart", "entry": "session-start", "timeout": 10},
+    {"event": "UserPromptSubmit", "entry": "prompt", "timeout": 10},
+    {"event": "PostToolUse", "matcher": "Write|Edit|NotebookEdit", "entry": "file", "timeout": 5},
+    {"event": "PostToolUse", "matcher": "*", "entry": "post-tool", "timeout": 10},
+    {"event": "SessionEnd", "entry": "session-end", "timeout": 10}
+  ]
+}
