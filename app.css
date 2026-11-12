@@ -187,9 +187,17 @@ a{color:var(--accent)}
   .bar2{padding:8px 12px}
   .bar .tag{display:none}
   .search kbd{display:none}
-  /* Brand row: the rail (and its brand) is hidden on a phone, and the row keeps the toolbar clear of
-     the browser's blurred band under the status bar. */
-  .mbrand{display:flex;align-items:center;gap:10px;padding:14px 14px 8px;font-weight:700;font-size:18px;letter-spacing:-.01em}
+  /* The page itself scrolls on a phone (not an inner panel), so iOS treats it as a normal scrolling page:
+     its blur under the status bar only appears once content moves beneath it. The header is sticky. */
+  .app{display:block;height:auto;min-height:100vh;min-height:100dvh;padding-top:0}
+  .pane{min-height:100vh;min-height:100dvh}
+  .scroll{flex:none;overflow:visible}
+  .phead{position:sticky;top:0;z-index:5;background:var(--surface);padding-top:env(safe-area-inset-top,0px);transition:box-shadow .2s}
+  /* Shown only once the page is scrolled: a soft edge under the header. */
+  .phead.scrolled{box-shadow:0 8px 18px -12px rgba(0,0,0,.55)}
+  .phead.scrolled .bar2{border-bottom-color:transparent}
+  /* Brand row, centred: the rail (and its brand) is hidden on a phone. */
+  .mbrand{display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 14px 6px;font-weight:700;font-size:18px;letter-spacing:-.01em}
   /* Board stacks its columns and scrolls vertically; an empty column shrinks to its heading. */
   .boardwrap{overflow-x:visible;padding:12px}
   .board{grid-template-columns:minmax(0,1fr);min-width:0;gap:12px}
