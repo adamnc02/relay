@@ -1642,6 +1642,72 @@ def pgpass_entry(path, host, port, db, user):
     return False, "no line for %s in %s" % (user, path)
 
 
+MANAGED_DIR = "/Library/Application Support/ClaudeCode"
+MDM_DOMAIN = "com.anthropic.claudecode"
+SKILLS = ("relay", "close", "relay-close", "relay-tickets")
+
+
+def policy_problems(settings, managed=True):
+    """Plain-English reasons a settings object stops Relay's user-level hooks or skills."""
+    out = []
+    if not isinstance(settings, dict):
+        return out
+    if settings.get("disableAllHooks") is True:
+        out.append("disableAllHooks: true turns every hook off, Relay's included" +
+                   (" (only an admin can change managed settings)" if managed else
+                    ": remove it from your settings.json"))
+    if managed and settings.get("allowManagedHooksOnly") is True:
+        out.append("allowManagedHooksOnly: true runs only the organisation's hooks, so Relay's hooks in "
+                   "~/.claude/settings.json are skipped")
+    spo = settings.get("strictPluginOnlyCustomization") if managed else None
+    if spo is True or (isinstance(spo, list) and ({"hooks", "skills"} & set(spo))):
+        what = "hooks and skills" if spo is True or {"hooks", "skills"} <= set(spo) else \
+            ("hooks" if "hooks" in spo else "skills")
+        out.append("strictPluginOnlyCustomization (%s) allows %s only from plugins, so Relay's user-level %s "
+                   "are skipped" % (json.dumps(spo), what, what))
+    return out
+
+
+def managed_sources(managed_dir=None):
+    """[(label, settings dict or None, error)] for the local managed-settings sources:
+    managed-settings.json, managed-settings.d/*.json and the MDM domain."""
+    d = managed_dir or os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
+    files = [os.path.join(d, "managed-settings.json")]
+    try:
+        files += sorted(os.path.join(d, "managed-settings.d", n) for n in os.listdir(os.path.join(d, "managed-settings.d"))
+                        if n.endswith(".json"))
+    except OSError:
+        pass
+    out = []
+    for f in files:
+        if not os.path.exists(f):
+            continue
+        try:
+            with open(f) as fh:
+                out.append((f, json.load(fh), None))
+        except (OSError, ValueError) as e:
+            out.append((f, None, "can't be read or parsed (%s)" % e.__class__.__name__))
+    if managed_dir is None and not os.environ.get("RELAY_MANAGED_DIR"):
+        import plistlib
+        for plist in ("/Library/Managed Preferences/%s.plist" % MDM_DOMAIN,
+                      os.path.expanduser("~/Library/Managed Preferences/%s.plist" % MDM_DOMAIN)):
+            if os.path.exists(plist):
+                try:
+                    with open(plist, "rb") as fh:
+                        out.append(("MDM " + plist, plistlib.load(fh), None))
+                except Exception as e:
+                    out.append(("MDM " + plist, None, "can't be read (%s)" % e.__class__.__name__))
+        try:
+            r = subprocess.run(["defaults", "export", MDM_DOMAIN, "-"], capture_output=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                data = plistlib.loads(r.stdout)
+                if data:
+                    out.append(("defaults domain " + MDM_DOMAIN, data, None))
+        except Exception:
+            pass
+    return out
+
+
 def cmd_doctor(args):
     """One PASS/FAIL line per check; exit 1 if any fails."""
     sid = session_id(args)
@@ -1709,9 +1775,30 @@ def cmd_doctor(args):
             missing.append("%s%s" % (event, "(%s)" % matcher if matcher else ""))
     check("hooks", not missing, "all %d in %s/settings.json" % (len(load_hook_spec()), claude) if not missing
           else "missing: %s. Run cli/install.sh" % ", ".join(missing))
-    skills = [n for n in ("relay", "close") if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
-    check("skills", not skills, "relay and close in %s/skills" % claude if not skills
+    user_problems = policy_problems(settings, managed=False)
+    if user_problems:
+        check("hooks-on", False, "your %s/settings.json: %s" % (claude, "; ".join(user_problems)))
+    sources = managed_sources()
+    problems = []
+    for label, data, err in sources:
+        if err:
+            problems.append("%s %s" % (label, err))
+        for msg in policy_problems(data):
+            problems.append("%s: %s" % (label, msg))
+    if problems:
+        check("managed", False, "organisation settings stop Relay: " + " | ".join(problems) +
+              ". The CLI still works by hand (relay attach, notes, close), but nothing runs automatically.")
+    else:
+        check("managed", True, ("%d local managed source(s), none blocks user hooks or skills" % len(sources))
+              if sources else "no local managed settings (file, managed-settings.d or MDM)")
+    skills = [n for n in SKILLS if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
+    check("skills", not skills, "%s in %s/skills" % (", ".join(SKILLS), claude) if not skills
           else "missing: %s. Run cli/install.sh" % ", ".join(skills))
+    md = os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
+    for name, alias in (("close", "/relay-close"), ("relay", "/relay-tickets")):
+        if os.path.exists(os.path.join(md, ".claude", "skills", name, "SKILL.md")):
+            print("warn  an organisation skill named %s takes /%s (managed skills win over personal ones): "
+                  "type %s instead" % (name, name, alias))
     try:
         with open(os.path.join(claude, "CLAUDE.md")) as f:
             has_block = BLOCK_BEGIN in f.read()
@@ -1726,6 +1813,8 @@ def cmd_doctor(args):
     if st:
         print("info  attached: %s" % (", ".join(x["key"] for x in st.get("tickets") or []) or "nothing"))
     print("info  queued jobs: %d" % len(queue_jobs()))
+    print("info  server-managed settings (claude.ai admin console) can't be read from here: inside Claude Code, "
+          "check /status (Setting sources) and `claude doctor` (Managed settings (remote))")
     if fails:
         print("%d check(s) failed: %s" % (len(fails), ", ".join(fails)))
         return 1
@@ -2065,7 +2154,9 @@ def cmd_setup(args):
         print(text)
         print(md_new)
         return
-    for name in ("relay", "close"):
+    for name in sorted(os.listdir(os.path.join(src, "skills"))):
+        if not os.path.isfile(os.path.join(src, "skills", name, "SKILL.md")):
+            continue
         with open(os.path.join(src, "skills", name, "SKILL.md")) as f:
             atomic_write(os.path.join(claude, "skills", name, "SKILL.md"), f.read())
     with open(os.path.join(src, "hooks.json")) as f:  # beside the binary, for `relay doctor`
@@ -2082,7 +2173,7 @@ def cmd_setup(args):
         print("Backed up settings.json to %s" % backup)
     mode = os.stat(real).st_mode & 0o777 if raw is not None else 0o644
     atomic_write(real, text, mode)
-    print("Hooks merged into %s; skills relay and close and the CLAUDE.md rule installed." % settings_path)
+    print("Hooks merged into %s; skills %s and the CLAUDE.md rule installed." % (settings_path, ", ".join(SKILLS)))
 
 
 # ---------------------------------------------------------------------------

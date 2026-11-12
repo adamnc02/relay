@@ -16,4 +16,5 @@ is `~/.claude/relay/bin/relay`, and the `relay` skill has the details.
 - **Files outside git**: change them with Write/Edit, or log a shell change with `relay file PATH`.
 - **The kickoff is `Continue KEY.`** It loads the ticket's brief, sessions, files and docs.
 - When a "closed without wrap-up" ticket for this folder shows up at session start, raise it first.
-- Finish a session with `/close`, `/close later` or `/close wait`.
+- Finish a session with `/close`, `/close later` or `/close wait`. If `/close` runs some other skill
+  (an organisation one), use `/relay-close`; `/relay-tickets` likewise stands in for `/relay`.

@@ -403,6 +403,35 @@ class LocalPaths(TempHome):
         self.assertEqual(relay.local_paths(), {})
 
 
+class ManagedSettings(unittest.TestCase):
+    def test_policy_problems(self):
+        P = relay.policy_problems
+        self.assertEqual(P({"model": "x", "allowManagedHooksOnly": False}), [])
+        self.assertEqual(len(P({"allowManagedHooksOnly": True})), 1)
+        self.assertEqual(len(P({"disableAllHooks": True})), 1)
+        self.assertIn("hooks and skills", P({"strictPluginOnlyCustomization": True})[0])
+        self.assertIn("allows skills only", P({"strictPluginOnlyCustomization": ["skills", "agents"]})[0])
+        self.assertEqual(P({"strictPluginOnlyCustomization": ["agents"]}), [])
+        self.assertEqual(P({"strictPluginOnlyCustomization": "true"}), [])  # only a real true counts
+        # in the user's own settings only disableAllHooks matters
+        self.assertEqual(P({"allowManagedHooksOnly": True}, managed=False), [])
+        self.assertIn("remove it", P({"disableAllHooks": True}, managed=False)[0])
+
+    def test_managed_sources_file_and_dropins(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        self.assertEqual(relay.managed_sources(d), [])
+        os.makedirs(os.path.join(d, "managed-settings.d"))
+        with open(os.path.join(d, "managed-settings.json"), "w") as f:
+            json.dump({"allowManagedHooksOnly": True}, f)
+        with open(os.path.join(d, "managed-settings.d", "10-team.json"), "w") as f:
+            f.write("{bad json")
+        src = relay.managed_sources(d)
+        self.assertEqual([os.path.basename(s[0]) for s in src], ["managed-settings.json", "10-team.json"])
+        self.assertTrue(relay.policy_problems(src[0][1]))
+        self.assertIsNotNone(src[1][2])
+
+
 class Kit(unittest.TestCase):
     def test_hooks_json_matches_builtin_spec(self):
         self.assertEqual(relay.load_hook_spec(os.path.dirname(SCRIPT)), relay.HOOK_SPEC)
@@ -430,7 +459,8 @@ class Kit(unittest.TestCase):
             json.dump({"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}}, f)
         with open(os.path.join(claude, "CLAUDE.md"), "w") as f:
             f.write("# My own rules\n")
-        env = dict(os.environ, HOME=d, RELAY_CONNINFO="host=127.0.0.1 port=9 dbname=x user=x sslmode=disable")
+        env = dict(os.environ, HOME=d, RELAY_CONNINFO="host=127.0.0.1 port=9 dbname=x user=x sslmode=disable",
+                   RELAY_MANAGED_DIR=os.path.join(d, "managed"))
         env.pop("RELAY_HOME", None)
         env.pop("CLAUDE_DIR", None)
         env.pop("PGPASSFILE", None)

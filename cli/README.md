@@ -10,6 +10,8 @@ cli/
   install.sh             installs into ~/.claude (re-runnable)
   skills/relay/SKILL.md  installed to ~/.claude/skills/relay/
   skills/close/SKILL.md  installed to ~/.claude/skills/close/  (/close, /close later, /close wait)
+  skills/relay-close/    /relay-close: the same as /close, under a name nothing else uses
+  skills/relay-tickets/  /relay-tickets: the same as the relay skill, likewise
   claude-md-rule.md      the ticket rule, installed as a marked block in ~/.claude/CLAUDE.md
   hooks.json             the hooks merged into ~/.claude/settings.json (event, matcher, entry, timeout)
   tests/test_relay.py    unit tests (stdlib unittest)
@@ -54,8 +56,8 @@ twice leaves `settings.json` and `CLAUDE.md` byte-identical.
    `relay/cli/install.sh`. The clone can be deleted afterwards: nothing installed points into it.
 4. **Check.** `~/.claude/relay/bin/relay doctor` prints one PASS/FAIL line each for psql, the pgpass
    entry, a TCP connection to the pooler on 5432 (3 s timeout), the login, a read of
-   `relay.projects`, the binary, the hooks in `settings.json`, the two skills and the CLAUDE.md
-   block, and exits 1 if any fails. **`FAIL network`** usually means the network blocks outbound
+   `relay.projects`, the binary, the hooks in `settings.json`, the organisation's managed settings,
+   the skills and the CLAUDE.md block, and exits 1 if any fails. **`FAIL network`** usually means the network blocks outbound
    port 5432, which corporate networks often do. Try another network, such as a phone hotspot.
    Until it passes, every hook stays silent and sessions carry on normally.
 5. **Folders.** `projects.paths` holds this Mac's folders, so on another machine sessions land in
@@ -73,6 +75,37 @@ twice leaves `settings.json` and `CLAUDE.md` byte-identical.
    worktree's main checkout. An entry naming an unknown or archived project is ignored. Its folders
    also count as the project's repos for the git snapshot.
 6. **Start a new Claude Code session.** Running sessions keep the settings they started with.
+
+### When an organisation manages Claude Code (a Team or Enterprise seat)
+
+Managed settings outrank `~/.claude/settings.json`, and some keys switch Relay's user-level parts
+off. `relay doctor`'s `managed` line reads every local managed source:
+`/Library/Application Support/ClaudeCode/managed-settings.json`, the drop-in folder
+`managed-settings.d/*.json` beside it, and the MDM profile domain `com.anthropic.claudecode`
+(`/Library/Managed Preferences/com.anthropic.claudecode.plist` and `defaults export`). It FAILs,
+saying which source and why, on:
+
+| Key | Effect on Relay |
+|---|---|
+| `allowManagedHooksOnly: true` | Only the organisation's hooks run. Relay's hooks are skipped |
+| `disableAllHooks: true` | No hooks run at all |
+| `strictPluginOnlyCustomization: true`, or an array containing `"hooks"` or `"skills"` | Hooks and/or skills load only from plugins. Relay's user-level ones are skipped |
+
+A `disableAllHooks: true` in your own `~/.claude/settings.json` FAILs too (`hooks-on`). With hooks
+blocked, the CLI and skills still work by hand (`relay attach`, `relay notes`, `relay close`), but
+nothing is injected or logged automatically. **Server-managed settings** (pushed from the claude.ai
+admin console) can't be read from disk. Inside Claude Code, `/status` shows them on its "Setting
+sources" line and `claude doctor` on "Managed settings (remote)".
+
+### Skill names
+
+Skills are invoked by folder name: `/relay` (Claude also loads it on its own at the start of real
+work), `/close`, `/close later`, `/close wait <need>`. A managed (enterprise) skill with the same name
+beats a personal one, so an organisation skill called `close` or `relay` would take the command.
+Two aliases that only you can invoke cover that: **`/relay-close`** (`later`, `wait <need>`) and
+**`/relay-tickets`**. Each just loads the original skill's file. `relay doctor` prints a `warn` line
+naming the alias when it finds a managed skill with one of those names. `relay close …` run directly
+works whatever the skill names are.
 
 
 The binary is in place before the settings file names it, so a session that reloads settings
@@ -229,3 +262,19 @@ creates and deletes, a file that was dirty before, commits, re-baselining, Write
 transcript parsing, context formatting and its cap, the settings and CLAUDE.md merges
 (idempotent, other keys kept), and that every hook exits 0 silently, within its time box, with the
 database unreachable or hung.
+
+## How to verify on the work laptop
+
+1. **`/status`** inside Claude Code: the "Setting sources" line lists every settings source in force,
+   including server-managed ones. User settings must be among them.
+2. **`claude doctor`**: the "Managed settings (remote)" line shows whether the organisation pushes
+   settings from the admin console. If it does, ask whether they set any key in the table above.
+3. **`~/.claude/relay/bin/relay doctor`**: every line PASS. Fix FAILs top-down. `network` is the
+   usual one on a corporate network (outbound 5432).
+4. **`claude --debug`**, then send a message and run one tool: the debug log shows each hook as it
+   registers and runs (SessionStart, UserPromptSubmit, PostToolUse for `Write|Edit|NotebookEdit` and
+   for `*`, and SessionEnd on exit), each running `~/.claude/relay/bin/relay hook <entry>`.
+5. **A real round trip**: in a scratch folder, `relay create "Work laptop check" --project INB`,
+   send a note to it from the Relay app, and run any tool after 30 s. The note appears in the
+   session's context. Then `/close` and archive the ticket from the app.
+
