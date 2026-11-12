@@ -89,7 +89,9 @@ One channel, `relay-board`, with a `postgres_changes` listener per table (`schem
 
 ## Phone layout (max-width 760px)
 
-- The rail becomes a slide-in drawer opened from the menu button. A **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible. It also keeps the toolbar clear of the browser's blurred band under the status bar.
+- The rail becomes a slide-in drawer opened from the menu button. A centred **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible.
+- 🚨 **The document scrolls, not an inner panel.** The brand row, toolbar and search form one sticky header (`.phead`, padded by the top safe-area inset). iOS draws its blur under the status bar according to the page's own scroll position, so it only appears once content moves beneath it. With an inner scroller (the desktop layout) the page never scrolls, and iOS showed the blur over the header at rest.
+- The header gains a soft shadow (`.phead.scrolled`) only once the content has scrolled. This uses the window scroll on a phone and `#out` on desktop.
 - The **board stacks its six columns** in one vertical scroll, with no sideways scrolling. An empty column shrinks to its heading. Drag and drop is for desktop; on a phone, status changes from the ticket panel.
 
 ## Offline

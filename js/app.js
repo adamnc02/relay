@@ -616,7 +616,7 @@ function bindShell() {
       renderNav(); return;
     }
     const nv = e.target.closest('[data-nav]');
-    if (nv) { st.nav = nv.dataset.nav; st.sideOpen = false; render(); $('out').scrollTop = 0; return; }
+    if (nv) { st.nav = nv.dataset.nav; st.sideOpen = false; render(); $('out').scrollTop = 0; window.scrollTo(0, 0); return; }
     if (e.target.closest('#menubtn')) { st.sideOpen = true; render(); return; }
     if (e.target.closest('#sidescrim')) { st.sideOpen = false; render(); return; }
     const o = e.target.closest('[data-open]');
@@ -786,6 +786,11 @@ function mountShell() {
     $('sampletag').hidden = false;
     document.title = 'Relay · Demo';
   }
+  // The header's shadow appears only once the content has scrolled. On a phone the page scrolls; on
+  // desktop the inner #out panel does.
+  const edge = () => $('phead').classList.toggle('scrolled', window.scrollY > 2 || $('out').scrollTop > 2);
+  window.addEventListener('scroll', edge, { passive: true });
+  $('out').addEventListener('scroll', edge, { passive: true });
 }
 
 mountShell();
