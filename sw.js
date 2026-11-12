@@ -4,7 +4,7 @@
 //   and the cached copy is used only when the network fails.
 // - Cross-origin requests (Supabase API, Realtime, Google Fonts) are never intercepted
 //   or cached. The offline copy of row data lives in localStorage, written by the app.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `relay-shell-${VERSION}`;
 const SHELL = [
   './',
