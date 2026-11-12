@@ -61,6 +61,8 @@ waiting if any child waits (need = the first waiting child's need, by phase) →
 
 ## Auth and app states
 
+🚨 **The session is Relay's own.** The client sets `auth.storageKey: 'relay.auth'`. Every app on `adamnc02.github.io` shares one origin and this Supabase project, so the default key (`sb-<ref>-auth-token`) would make Relay read and refresh Listly's session. Refresh-token rotation then invalidates the other app's copy. Sign-out uses `scope: 'local'`, because the default `global` scope revokes every session of the account in every app on every device.
+
 Google sign-in with `signInWithOAuth({ provider: 'google', options: { redirectTo } })`. `redirectTo` is derived from the page: origin plus the page's directory, never the query or fragment (`https://adamnc02.github.io/relay/` live, `http://localhost:8000/relay/` locally). Each target must be in Supabase → Authentication → URL Configuration → Redirect URLs, or Supabase silently falls back to the project's Site URL. Before redirecting, the attempt is recorded in `sessionStorage` (`relay:auth:attempt`); landing back without a session shows which address to check. A leftover `#access_token` fragment is cleared from the address bar.
 
 `start()` resolves to one of these states, each with its own screen:

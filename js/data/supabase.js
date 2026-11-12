@@ -93,7 +93,10 @@ export function createSupabaseAdapter() {
       }
       client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
         db: { schema: SCHEMA },
-        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+        // 🚨 Relay's own storageKey. Every app on adamnc02.github.io shares one origin and this Supabase
+        // project, so the default key would share Listly's session. One app refreshing the shared token
+        // then invalidates the other's copy.
+        auth: { storageKey: 'relay.auth', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
       });
 
       const { data, error } = await client.auth.getSession();
@@ -140,7 +143,9 @@ export function createSupabaseAdapter() {
     async signOut() {
       channel && client.removeChannel(channel);
       channel = null;
-      const { error } = await client.auth.signOut();
+      // scope 'local': the default ('global') revokes every session of the account, signing the same
+      // Google user out of Listly, Pinch and the ledger on every device.
+      const { error } = await client.auth.signOut({ scope: 'local' });
       if (error) console.warn('[auth] sign-out failed:', error.message);
     },
 
