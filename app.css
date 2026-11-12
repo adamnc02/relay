@@ -81,6 +81,11 @@ a{color:var(--accent)}
 .nav-i.wait .n{background:var(--wait);color:var(--surface);padding:0 7px;border-radius:99px;font-weight:600}
 .nav-empty{margin:0;padding:2px 8px;font-size:12px;line-height:1.4;color:var(--muted)}
 .nav-h{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600;padding:16px 8px 4px}
+.nav-sec{display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;cursor:pointer;text-align:left;border-radius:6px;font-family:inherit}
+.nav-sec:hover{color:var(--fg)}
+.nav-sec .chev{flex:none;transition:transform .15s}
+.nav-sec[aria-expanded="false"] .chev{transform:rotate(-90deg)}
+.nav-sec .n{margin-left:auto;font-family:var(--font-id);font-size:11.5px;letter-spacing:0;text-transform:none;font-weight:500}
 .side-foot{margin-top:auto;display:flex;align-items:center;gap:9px;padding:12px 8px 4px;border-top:1px solid var(--line);font-size:12.5px;line-height:1.3}
 .side-foot small{color:var(--muted)}
 .foot-who{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
