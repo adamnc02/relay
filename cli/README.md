@@ -11,6 +11,7 @@ cli/
   skills/relay/SKILL.md  installed to ~/.claude/skills/relay/
   skills/close/SKILL.md  installed to ~/.claude/skills/close/  (/close, /close later, /close wait)
   claude-md-rule.md      the ticket rule, installed as a marked block in ~/.claude/CLAUDE.md
+  hooks.json             the hooks merged into ~/.claude/settings.json (event, matcher, entry, timeout)
   tests/test_relay.py    unit tests (stdlib unittest)
 ```
 
@@ -23,16 +24,56 @@ cli/install.sh --dry-run  # print the merged settings.json and CLAUDE.md; change
 
 `install.sh`:
 
-1. copies `relay` to `~/.claude/relay/bin/relay` (temp file + rename), so nothing installed depends
-   on a git checkout;
-2. writes the two skills;
+1. reports what's missing: psql (with `brew install libpq && brew link --force libpq`) and the
+   `~/.pgpass` line (with its format and `chmod 600`). It never writes a password;
+2. copies `relay` to `~/.claude/relay/bin/relay` (temp file + rename), so nothing installed depends
+   on a git checkout, and writes the skills and `hooks.json` beside the binary;
 3. writes the ticket rule into `~/.claude/CLAUDE.md` between `<!-- relay:begin … -->` and
    `<!-- relay:end -->`, replacing an earlier block and keeping everything else;
-4. copies `~/.claude/settings.json` to `~/.claude/backups/settings.json.pre-relay-<timestamp>`,
+4. copies `~/.claude/settings.json` to `~/.claude/backups/settings.json.pre-relay-<timestamp>`
+   (`settings.json.relay-reinstall-<timestamp>` when Relay hooks are already in it),
    then merges the hooks in with one atomic replace. Other keys and other hooks are kept. Any
    earlier Relay hook (a command containing `/.claude/relay/bin/relay`) is replaced, so re-running
    doesn't duplicate them;
-5. runs `relay doctor`.
+5. runs `relay doctor`. A FAIL there doesn't undo the install: the hooks stay silent until it's fixed.
+
+Every path is resolved from `$HOME` at install time, so the same kit installs on any Mac. Running it
+twice leaves `settings.json` and `CLAUDE.md` byte-identical.
+
+## Install on another Mac
+
+1. **psql.** `command -v psql`. If it's missing: `brew install libpq && brew link --force libpq`.
+2. **The password line.** Add this line to `~/.pgpass`, with the `claude_relay` password in place of
+   `<password>`, then `chmod 600 ~/.pgpass` (psql ignores a file others can read):
+
+   ```
+   aws-0-eu-central-1.pooler.supabase.com:5432:postgres:claude_relay.nxekrfdagkdwhjuunsrl:<password>
+   ```
+
+3. **The kit.** `git clone https://github.com/adamnc02/relay` anywhere, then run
+   `relay/cli/install.sh`. The clone can be deleted afterwards: nothing installed points into it.
+4. **Check.** `~/.claude/relay/bin/relay doctor` prints one PASS/FAIL line each for psql, the pgpass
+   entry, a TCP connection to the pooler on 5432 (3 s timeout), the login, a read of
+   `relay.projects`, the binary, the hooks in `settings.json`, the two skills and the CLAUDE.md
+   block, and exits 1 if any fails. **`FAIL network`** usually means the network blocks outbound
+   port 5432, which corporate networks often do. Try another network, such as a phone hotspot.
+   Until it passes, every hook stays silent and sessions carry on normally.
+5. **Folders.** `projects.paths` holds this Mac's folders, so on another machine sessions land in
+   Inbox unless the folder matches. Map the local folders in `~/.claude/relay/paths.json`:
+
+   ```json
+   {
+     "~/Code/relay": "RLY",
+     "~/Code/data-sketch": "DSK"
+   }
+   ```
+
+   Keys are folder prefixes (`~` allowed, matched on whole path components, longest wins) and values
+   are project keys. This file is checked before `projects.paths`, for the folder and then for a
+   worktree's main checkout. An entry naming an unknown or archived project is ignored. Its folders
+   also count as the project's repos for the git snapshot.
+6. **Start a new Claude Code session.** Running sessions keep the settings they started with.
+
 
 The binary is in place before the settings file names it, so a session that reloads settings
 half-way through an install never runs a hook that isn't there.
@@ -80,7 +121,7 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `notes [--key K]` | Adam's unseen notes (actor `adam`, kind `note`, `seen_at` null) on the attached tickets: sets `seen_at` and prints them |
 | `sweep` | Logs git-changed files since the snapshot (below) |
 | `flush` | Sends the local queue |
-| `doctor` | psql, a live query, the session's tickets and snapshot repos, the queue length |
+| `doctor` | PASS/FAIL per check: psql, the pgpass entry, TCP to the pooler, login, a read of `relay.projects`, the binary, the hooks, the skills, the CLAUDE.md block. Then the paths.json overrides, session, tickets and queue length. Exits 1 on any FAIL |
 | `setup --src DIR [--claude-dir D] [--bin PATH] [--dry-run]` | What `install.sh` runs |
 
 Commands that act on a ticket default to the session's current ticket (the last one attached) and
@@ -109,8 +150,8 @@ with actor `hook:session-end` ("Session … ended without /close (reason). Last 
 4,000 characters), and upserts the session row with `ended_at` and `closed_by = 'session-end'`. It
 never changes the status.
 
-**Context** (SessionStart, `relay context`): the project the working folder matches (longest
-`projects.paths` prefix on whole path components; a linked git worktree also matches through its
+**Context** (SessionStart, `relay context`): the project the working folder matches (an entry in
+`~/.claude/relay/paths.json`, else the longest `projects.paths` prefix on whole path components; a linked git worktree also matches through its
 main checkout's folder; else Inbox), then any **closed-without-wrap-up** tickets for that project
 or last worked from that folder, then the project's open tickets (parents with their phases), then
 everything **Waiting for me** in other projects, then the ticket rule. It is cut to 9,500
@@ -135,6 +176,8 @@ characters (Claude Code's limit is 10,000).
 | Path | What |
 |---|---|
 | `bin/relay` | The installed CLI |
+| `bin/hooks.json` | The installed hook list (`relay doctor` checks settings.json against it) |
+| `paths.json` | Optional: this machine's folder prefix → project key overrides |
 | `sessions/<id>.json` | Session → tickets (the last is current), cwd, `closed`, `ended`, and the git snapshot per repo |
 | `sessions/<id>.paths` | Paths the session changed with Write/Edit/NotebookEdit (the sweep skips them) |
 | `sessions/<id>.check` | mtime = the last note check (set in the future while backing off) |

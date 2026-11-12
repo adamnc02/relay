@@ -384,5 +384,84 @@ class HookSafety(TempHome):
         self.assertFalse(relay.throttled("s4"))
 
 
+class LocalPaths(TempHome):
+    def test_override_beats_db_and_unknown_keys_ignored(self):
+        with open(os.path.join(relay.sdir(), "paths.json"), "w") as f:
+            json.dump({"/work/code/relay": "rly", "/work/code/other": "NOPE", "/Users/a/GitHub/relay/js": "SUP"}, f)
+        ov = relay.local_paths()
+        self.assertEqual(ov["/work/code/relay"], "RLY")
+        self.assertEqual(relay.project_for("/work/code/relay/cli", PROJECTS, ov)[0]["key"], "RLY")
+        self.assertEqual(relay.project_for("/work/code/other", PROJECTS, ov)[0]["key"], "INB")
+        self.assertEqual(relay.project_for("/Users/a/GitHub/relay/js/x", PROJECTS, ov)[0]["key"], "SUP")
+        self.assertEqual(relay.project_for("/Users/a/GitHub/relay", PROJECTS, ov)[0]["key"], "RLY")
+        self.assertIn("/work/code/relay", relay.project_paths(PROJECTS[0], ov))
+
+    def test_missing_or_bad_file(self):
+        self.assertEqual(relay.local_paths(), {})
+        with open(os.path.join(relay.sdir(), "paths.json"), "w") as f:
+            f.write("[1, 2]")
+        self.assertEqual(relay.local_paths(), {})
+
+
+class Kit(unittest.TestCase):
+    def test_hooks_json_matches_builtin_spec(self):
+        self.assertEqual(relay.load_hook_spec(os.path.dirname(SCRIPT)), relay.HOOK_SPEC)
+
+    def test_pgpass_entry(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        p = os.path.join(d, "pgpass")
+        with open(p, "w") as f:
+            f.write("other:5432:postgres:claude_ro.x:pw\n*:5432:postgres:claude_relay.x:secret\n")
+        os.chmod(p, 0o600)
+        self.assertTrue(relay.pgpass_entry(p, "h", "5432", "postgres", "claude_relay.x")[0])
+        self.assertFalse(relay.pgpass_entry(p, "h", "5432", "postgres", "nobody")[0])
+        os.chmod(p, 0o644)
+        ok, detail = relay.pgpass_entry(p, "h", "5432", "postgres", "claude_relay.x")
+        self.assertFalse(ok)
+        self.assertIn("chmod 600", detail)
+
+    def test_install_into_a_fresh_home_twice_is_idempotent(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        claude = os.path.join(d, ".claude")
+        os.makedirs(claude)
+        with open(os.path.join(claude, "settings.json"), "w") as f:
+            json.dump({"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}}, f)
+        with open(os.path.join(claude, "CLAUDE.md"), "w") as f:
+            f.write("# My own rules\n")
+        env = dict(os.environ, HOME=d, RELAY_CONNINFO="host=127.0.0.1 port=9 dbname=x user=x sslmode=disable")
+        env.pop("RELAY_HOME", None)
+        env.pop("CLAUDE_DIR", None)
+        env.pop("PGPASSFILE", None)
+        install = os.path.join(os.path.dirname(SCRIPT), "install.sh")
+        outs = []
+        for _ in range(2):
+            time.sleep(1.1)  # backup names carry a seconds timestamp
+            r = subprocess.run(["sh", install], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(claude, "settings.json")) as f:
+                outs.append(f.read())
+        self.assertEqual(outs[0], outs[1])
+        s = json.loads(outs[1])
+        self.assertEqual(s["model"], "opus")
+        self.assertEqual(s["hooks"]["Stop"][0]["hooks"][0]["command"], "mine.sh")
+        self.assertEqual(s["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+                         os.path.join(d, ".claude/relay/bin/relay") + " hook session-start")
+        with open(os.path.join(claude, "CLAUDE.md")) as f:
+            md = f.read()
+        self.assertTrue(md.startswith("# My own rules\n"))
+        self.assertEqual(md.count(relay.BLOCK_BEGIN), 1)
+        backups = sorted(os.listdir(os.path.join(claude, "backups")))
+        self.assertEqual([b.split("-2")[0] for b in backups],
+                         ["settings.json.pre-relay", "settings.json.relay-reinstall"])
+        self.assertTrue(os.path.exists(os.path.join(claude, "skills/close/SKILL.md")))
+        self.assertIn("MISSING  the Relay line", r.stdout)   # no ~/.pgpass in the fresh home
+        self.assertNotIn("<password>:", "")                  # the kit only ever prints the placeholder
+        self.assertIn("FAIL  network", r.stdout)             # unreachable DB reported plainly
+        self.assertIn("PASS  hooks", r.stdout)
+        self.assertIn("PASS  skills", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

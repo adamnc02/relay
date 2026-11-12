@@ -429,17 +429,52 @@ def main_worktree(path):
     return os.path.dirname(common) if common.endswith("/.git") else None
 
 
-def project_for(cwd, projects):
-    """(project, matched). Falls back to the main worktree's folder, then Inbox."""
-    p = match_project(cwd, projects)
-    if p:
-        return p, True
+def local_paths(path=None):
+    """~/.claude/relay/paths.json: {"/folder/prefix": "KEY"}, checked before the
+    database's projects.paths (for machines whose folders differ)."""
+    try:
+        with open(path or os.path.join(home(), "paths.json")) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return dict((norm(k), v.strip().upper()) for k, v in d.items()
+                if isinstance(k, str) and isinstance(v, str) and k.strip())
+
+
+def match_local(path, projects, overrides):
+    best, best_len = None, -1
+    for prefix, key in (overrides or {}).items():
+        if path_under(path, prefix) and len(prefix) > best_len:
+            p = next((x for x in projects if x.get("key") == key and not x.get("archived")), None)
+            if p:
+                best, best_len = p, len(prefix)
+    return best
+
+
+def project_for(cwd, projects, overrides=None):
+    """(project, matched): the local paths.json first, then projects.paths, for the
+    folder and then for a linked worktree's main checkout; else Inbox."""
+    overrides = local_paths() if overrides is None else overrides
+    candidates = [cwd]
     mw = main_worktree(cwd)
     if mw:
-        p = match_project(mw, projects)
+        candidates.append(mw)
+    for c in candidates:
+        p = match_local(c, projects, overrides) or match_project(c, projects)
         if p:
             return p, True
     return inbox(projects), False
+
+
+def project_paths(project, overrides=None):
+    """A project's folders: projects.paths plus this machine's paths.json entries for it."""
+    overrides = local_paths() if overrides is None else overrides
+    paths = list((project or {}).get("paths") or [])
+    key = (project or {}).get("key")
+    paths += [f for f, k in sorted(overrides.items()) if key and k == key and f not in paths]
+    return paths
 
 
 def parse_porcelain_z(out):
@@ -519,7 +554,7 @@ def sweep_repo(root, snap, written):
 def snapshot_targets(cwd, projects=None, project=None):
     """Git repos to snapshot: cwd's repo and the repos in the project's paths."""
     roots = []
-    for p in [cwd] + list((project or {}).get("paths") or []):
+    for p in [cwd] + (project_paths(project) if project else []):
         r = repo_root(p) if p and os.path.exists(p) else None
         if r and r not in roots:
             roots.append(r)
@@ -763,6 +798,7 @@ s as (
   returning 1
 )
 select json_build_object('id', u.id, 'key', u.display_key, 'title', u.title, 'status', u.status,
+  'project', (select p.key from relay.projects p where p.id = u.project_id),
   'project_paths', (select p.paths from relay.projects p where p.id = u.project_id)) from u
 """
 
@@ -1150,7 +1186,8 @@ def format_get(d, all_sessions=False):
     out.append("# %s · %s" % (t["key"], t["title"]))
     meta = "Project %s (%s) · %s" % (t["project"], t["project_name"], label(t["status"]))
     if d.get("parent"):
-        meta += " · phase %s of %s %s" % (t.get("phase") or "?", d["parent"]["key"], d["parent"]["title"])
+        meta += " · phase %s of %s %s" % ("?" if t.get("phase") is None else t["phase"], d["parent"]["key"],
+                                           d["parent"]["title"])
     if t.get("children"):
         meta += " · parent of %d phases (status rolls up from them)" % t["children"]
     meta += " · updated %s by %s" % (t.get("updated"), t.get("updated_by"))
@@ -1186,7 +1223,8 @@ def format_get(d, all_sessions=False):
         out.append("## Phases")
         for p in phases:
             mark = " ← this ticket" if p["key"] == t["key"] else ""
-            line = "%s. %s %s — %s%s" % (p.get("phase") or "-", p["key"], p["title"], label(p["status"]), mark)
+            ph = p.get("phase")
+            line = "%s. %s %s — %s%s" % ("-" if ph is None else ph, p["key"], p["title"], label(p["status"]), mark)
             if p.get("status") == "waiting" and p.get("need"):
                 line += " (need: %s)" % p["need"]
             if p.get("archived"):
@@ -1198,10 +1236,12 @@ def format_get(d, all_sessions=False):
     sessions = d.get("sessions") or []
     out.append("")
     shown = sessions if all_sessions else sessions[:3]
-    out.append("## Sessions (%s)" % ("all %d" % len(sessions) if all_sessions or len(sessions) <= 3
-                                     else "last 3 of %d; --all for every one" % len(sessions)))
     if not sessions:
-        out.append("(none yet)")
+        out.append("## Sessions (none yet)")
+    elif all_sessions or len(sessions) <= 3:
+        out.append("## Sessions (%d)" % len(sessions))
+    else:
+        out.append("## Sessions (last 3 of %d; --all for every one)" % len(sessions))
     for s in shown:
         head = "- %s → %s · %s" % (s.get("started"), s.get("ended") or "open", s.get("session_id"))
         if s.get("closed_by"):
@@ -1321,7 +1361,7 @@ def do_attach(key, sid, cwd):
     if not t:
         raise RelayError("no ticket %s" % v["key"])
     remember(sid, t, cwd)
-    roots = snapshot_targets(cwd, project={"paths": t.get("project_paths") or []})
+    roots = snapshot_targets(cwd, project={"key": t.get("project"), "paths": t.get("project_paths") or []})
     add_snapshots(sid, roots)
     return t
 
@@ -1570,26 +1610,127 @@ def cmd_close(args):
                                                    ", %d shell-changed file(s) swept" % len(found) if found else ""))
 
 
-def cmd_doctor(args):
-    sid = session_id(args)
-    print("relay %s at %s" % (VERSION, os.path.abspath(__file__)))
-    print("state: %s" % home())
+def conninfo_fields():
+    d = {}
+    for tok in shlex.split(os.environ.get("RELAY_CONNINFO", CONNINFO_DEFAULT)):
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            d[k] = v
+    return d
+
+
+PGPASS_LINE = "aws-0-eu-central-1.pooler.supabase.com:5432:postgres:claude_relay.nxekrfdagkdwhjuunsrl:<password>"
+
+
+def pgpass_entry(path, host, port, db, user):
+    """(found, detail) for a ~/.pgpass line psql would use for this connection."""
     try:
-        print("psql: %s" % find_psql())
-    except DBError as e:
-        print("psql: MISSING (%s)" % e)
-    print("session: %s" % (sid or "(none)"))
-    st = load_state(sid)
-    if st:
-        print("attached: %s" % ", ".join(x["key"] for x in st.get("tickets") or []) or "nothing")
-        print("snapshot repos: %s" % ", ".join(sorted(st.get("snapshot") or {})) or "none")
-    print("queued jobs: %d" % len(queue_jobs()))
+        st = os.stat(path)
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False, "%s doesn't exist" % path
+    want = [host, port, db, user]
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = re.split(r"(?<!\\):", line, 4)
+        if len(parts) == 5 and all(a == "*" or a == b for a, b in zip(parts[:4], want)) and parts[4]:
+            if st.st_mode & 0o077:
+                return False, "%s has the entry but psql ignores it: run chmod 600 %s" % (path, path)
+            return True, "%s has an entry for %s (mode 600)" % (path, user)
+    return False, "no line for %s in %s" % (user, path)
+
+
+def cmd_doctor(args):
+    """One PASS/FAIL line per check; exit 1 if any fails."""
+    sid = session_id(args)
+    claude = norm(os.environ.get("CLAUDE_DIR") or os.path.expanduser("~/.claude"))
+    bin_path = os.path.join(home(), "bin", "relay")
+    fails = []
+
+    def check(name, ok, detail):
+        print("%s  %-10s %s" % ("PASS" if ok else "FAIL", name, detail))
+        if not ok:
+            fails.append(name)
+
+    print("relay %s at %s · state %s" % (VERSION, os.path.abspath(__file__), home()))
+    try:
+        exe = find_psql()
+        ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
+        check("psql", True, "%s (%s)" % (exe, ver))
+    except Exception:
+        check("psql", False, "not found. Install it: brew install libpq && brew link --force libpq")
+    ci = conninfo_fields()
+    host, port, db, user = ci.get("host", ""), ci.get("port", "5432"), ci.get("dbname", ""), ci.get("user", "")
+    pgpass = os.environ.get("PGPASSFILE") or os.path.expanduser("~/.pgpass")
+    ok, detail = pgpass_entry(pgpass, host, port, db, user)
+    if not ok and "chmod" not in detail:
+        detail += ". Add this line (your password in place of <password>), then chmod 600 %s:\n" \
+                  "                 %s" % (pgpass, PGPASS_LINE)
+    check("pgpass", ok, detail)
+    tcp = False
     t0 = time.time()
     try:
-        n = q("select json_build_object('u', current_user, 'n', (select count(*) from relay.projects))")
-        print("database: ok as %s, %d projects (%.2fs)" % (n["u"], n["n"], time.time() - t0))
-    except DBError as e:
-        print("database: FAILED (%s)" % explain_db(e))
+        socket.create_connection((host, int(port)), timeout=3).close()
+        tcp = True
+        check("network", True, "TCP to %s:%s in %.2fs" % (host, port, time.time() - t0))
+    except Exception as e:
+        check("network", False, "can't open a TCP connection to %s:%s within 3 s (%s). Corporate networks often "
+              "block outbound port %s: try another network (a phone hotspot) or ask IT to allow it." % (
+                  host, port, e.__class__.__name__, port))
+    if tcp:
+        try:
+            u = q("select json_build_object('u', current_user)", timeout=8)
+            check("login", u.get("u") == "claude_relay", "signed in as %s" % u.get("u"))
+            try:
+                n = q("select json_build_object('n', (select count(*) from relay.projects))", timeout=8)
+                check("read", n["n"] > 0, "relay.projects has %d rows" % n["n"])
+            except DBError as e:
+                check("read", False, explain_db(e))
+        except DBError as e:
+            check("login", False, explain_db(e))
+            check("read", False, "skipped (no login)")
+    else:
+        check("login", False, "skipped (no network)")
+        check("read", False, "skipped (no network)")
+    check("binary", os.access(bin_path, os.X_OK), bin_path + ("" if os.access(bin_path, os.X_OK) else " is missing: run cli/install.sh"))
+    try:
+        with open(os.path.join(claude, "settings.json")) as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        settings = {}
+    missing = []
+    for event, matcher, entry, timeout in load_hook_spec():
+        want = "%s hook %s" % (shlex.quote(bin_path), entry)
+        found = any(h.get("command") == want and (g.get("matcher") or None) == matcher
+                    for g in (settings.get("hooks") or {}).get(event) or [] for h in g.get("hooks") or [])
+        if not found:
+            missing.append("%s%s" % (event, "(%s)" % matcher if matcher else ""))
+    check("hooks", not missing, "all %d in %s/settings.json" % (len(load_hook_spec()), claude) if not missing
+          else "missing: %s. Run cli/install.sh" % ", ".join(missing))
+    skills = [n for n in ("relay", "close") if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
+    check("skills", not skills, "relay and close in %s/skills" % claude if not skills
+          else "missing: %s. Run cli/install.sh" % ", ".join(skills))
+    try:
+        with open(os.path.join(claude, "CLAUDE.md")) as f:
+            has_block = BLOCK_BEGIN in f.read()
+    except OSError:
+        has_block = False
+    check("rule", has_block, "ticket rule block in %s/CLAUDE.md" % claude if has_block
+          else "no Relay block in %s/CLAUDE.md. Run cli/install.sh" % claude)
+    overrides = local_paths()
+    print("info  paths.json: %s" % ("%d folder override(s)" % len(overrides) if overrides else "none"))
+    print("info  session: %s" % (sid or "(none: outside Claude Code)"))
+    st = load_state(sid)
+    if st:
+        print("info  attached: %s" % (", ".join(x["key"] for x in st.get("tickets") or []) or "nothing"))
+    print("info  queued jobs: %d" % len(queue_jobs()))
+    if fails:
+        print("%d check(s) failed: %s" % (len(fails), ", ".join(fails)))
+        return 1
+    print("All checks passed.")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1835,12 +1976,27 @@ HOOK_SPEC = [
 ]
 
 
+def load_hook_spec(src=None):
+    """The hooks Relay installs: cli/hooks.json next to the source (or the installed
+    copy next to the binary), else the built-in HOOK_SPEC."""
+    for d in [src, os.path.dirname(os.path.abspath(__file__))]:
+        if not d:
+            continue
+        try:
+            with open(os.path.join(d, "hooks.json")) as f:
+                rows = json.load(f)["hooks"]
+            return [(r["event"], r.get("matcher"), r["entry"], int(r["timeout"])) for r in rows]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return list(HOOK_SPEC)
+
+
 def is_relay_hook(h, bin_path):
     cmd = (h or {}).get("command") or ""
     return RELAY_MARK in cmd or (bin_path and bin_path in cmd)
 
 
-def merge_hooks(settings, bin_path):
+def merge_hooks(settings, bin_path, spec=None):
     """Return a copy of settings with Relay's hooks in place. Other hooks and
     keys are kept; earlier Relay hooks are replaced, so it is idempotent."""
     s = json.loads(json.dumps(settings or {}))
@@ -1856,7 +2012,7 @@ def merge_hooks(settings, bin_path):
             hooks[event] = groups
         else:
             del hooks[event]
-    for event, matcher, name, timeout in HOOK_SPEC:
+    for event, matcher, name, timeout in (spec or HOOK_SPEC):
         g = {"hooks": [{"type": "command", "command": "%s hook %s" % (shlex.quote(bin_path), name),
                         "timeout": timeout}]}
         if matcher:
@@ -1895,7 +2051,7 @@ def cmd_setup(args):
         settings = json.loads(raw) if raw.strip() else {}
     except FileNotFoundError:
         raw, settings = None, {}
-    merged = merge_hooks(settings, bin_path)
+    merged = merge_hooks(settings, bin_path, load_hook_spec(src))
     text = json.dumps(merged, indent=2) + "\n"
     claude_md = os.path.join(claude, "CLAUDE.md")
     try:
@@ -1912,10 +2068,15 @@ def cmd_setup(args):
     for name in ("relay", "close"):
         with open(os.path.join(src, "skills", name, "SKILL.md")) as f:
             atomic_write(os.path.join(claude, "skills", name, "SKILL.md"), f.read())
+    with open(os.path.join(src, "hooks.json")) as f:  # beside the binary, for `relay doctor`
+        atomic_write(os.path.join(os.path.dirname(bin_path), "hooks.json"), f.read())
     if md_new != md_old:
         atomic_write(claude_md, md_new)
     if raw is not None:
-        backup = os.path.join(claude, "backups", "settings.json.pre-relay-%s" % stamp)
+        had = any(is_relay_hook(h, bin_path) for gs in (settings.get("hooks") or {}).values()
+                  for g in gs or [] for h in g.get("hooks") or [])
+        backup = os.path.join(claude, "backups", "settings.json.%s-%s" % (
+            "relay-reinstall" if had else "pre-relay", stamp))
         os.makedirs(os.path.dirname(backup), exist_ok=True)
         shutil.copy2(real, backup)
         print("Backed up settings.json to %s" % backup)
@@ -2035,8 +2196,7 @@ def main(argv=None):
         build_parser().print_help()
         return 0
     try:
-        args.fn(args)
-        return 0
+        return args.fn(args) or 0
     except DBError as e:
         sys.stderr.write("relay: %s\n" % explain_db(e))
         return 1
