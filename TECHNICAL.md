@@ -80,6 +80,11 @@ The smoke test is a real `select id from projects limit 1` through the client (`
 
 One channel, `relay-board`, with a `postgres_changes` listener per table (`schema: 'relay'`, `event: '*'`). Each payload is applied to the store and the screen re-renders; an open ticket panel keeps the note being typed, the Jira field, focus and scroll position. When the channel recovers from `CHANNEL_ERROR` / `TIMED_OUT` the app reloads everything once. It also reloads when the page becomes visible again.
 
+## View defaults
+
+- The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
+- The rail's **Apps** and **Jira** headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
+
 ## Offline
 
 After every load and change the store is saved to `localStorage` (`relay:snapshot:v1`, debounced, wrapped in try/catch). If the network is down at start, the app loads that copy, shows an "Offline" strip with the copy's age, and disables every write. The `online` event retries. Sign-out clears the copy.

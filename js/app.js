@@ -13,13 +13,18 @@ const store = createStore();
 const $ = (id) => document.getElementById(id);
 
 const st = {
-  view: 'list', nav: 'open', q: '', collapsed: { done: true }, folded: {}, sideOpen: false,
+  view: 'board', nav: 'open', q: '', collapsed: { done: true }, folded: {}, sideOpen: false,
   openId: null, readOnly: false, live: 'connecting', user: null, offlineAt: null, booted: false,
+  // Rail sections: Apps starts collapsed, Jira open.
+  railFold: { apps: true, jira: false },
 };
 try {
-  const v = localStorage.getItem('relay-view');
+  // 'relay-view-2': the default became Board, so a List choice saved under the old key doesn't apply.
+  const v = localStorage.getItem('relay-view-2');
   if (v === 'board' || v === 'list') st.view = v;
-} catch { /* storage blocked */ }
+  const f = JSON.parse(localStorage.getItem('relay-rail-fold') || 'null');
+  if (f && typeof f === 'object') st.railFold = { ...st.railFold, ...f };
+} catch { /* storage blocked or bad JSON */ }
 
 /* ---------- derived data ---------- */
 
@@ -98,15 +103,23 @@ function matches(t) {
 function renderNav() {
   const live = D.tickets.filter((t) => !hidden(t) && !isParent(t));
   const it = (id, label, count, lead, cls = '') => `<button class="nav-i ${cls}" data-nav="${esc(id)}" aria-current="${st.nav === id}">${lead}<span class="nl">${esc(label)}</span><span class="n">${count}</span></button>`;
-  const grp = (title, list) => `<div class="nav-h">${title}</div>` + list.map((p) => it('p:' + p.key, p.name, live.filter((t) => t.project_id === p.id).length, `<i class="dot" style="background:${esc(p.colour)}"></i>`)).join('');
+  const item = (p) => it('p:' + p.key, p.name, live.filter((t) => t.project_id === p.id).length, `<i class="dot" style="background:${esc(p.colour)}"></i>`);
+  // A collapsed section still shows the project you're viewing, so the current view never disappears from the rail.
+  const sec = (id, title, list, empty) => {
+    const folded = !!st.railFold[id];
+    const n = live.filter((t) => list.some((p) => p.id === t.project_id)).length;
+    const shown = folded ? list.filter((p) => st.nav === 'p:' + p.key) : list;
+    const body = list.length ? shown.map(item).join('') : (folded ? '' : empty);
+    return `<button class="nav-h nav-sec" data-railsec="${id}" aria-expanded="${!folded}">${CHEV}<span>${title}</span>${folded && n ? `<span class="n">${n}</span>` : ''}</button>${body}`;
+  };
   const apps = D.projects.filter((p) => p.kind !== 'jira');
   const jira = D.projects.filter((p) => p.kind === 'jira');
   $('nav').innerHTML =
     it('waiting', 'Waiting for me', live.filter((t) => t.status === 'waiting').length, sicon('waiting'), 'wait') +
     it('open', 'All tickets', live.length, I_ALL) +
     it('archived', 'Archived', D.tickets.filter((t) => hidden(t) && !isParent(t)).length, I_ARCH) +
-    (apps.length ? grp('Apps', apps) : '') +
-    (jira.length ? grp('Jira', jira) : `<div class="nav-h">Jira</div><p class="nav-empty">Paste a Jira issue link into search to add your first Jira ticket.</p>`);
+    (apps.length ? sec('apps', 'Apps', apps, '') : '') +
+    sec('jira', 'Jira', jira, `<p class="nav-empty">Paste a Jira issue link into search to add your first Jira ticket.</p>`);
 }
 function navTitle() {
   const n = st.nav;
@@ -596,6 +609,12 @@ function bindShell() {
     if (xp) { const k = xp.dataset.expand; st.folded[k] = !st.folded[k]; render(); return; }
     const cl = e.target.closest('[data-collapse]');
     if (cl) { const s = cl.dataset.collapse; st.collapsed[s] = !st.collapsed[s]; render(); return; }
+    const rs = e.target.closest('[data-railsec]');
+    if (rs) {
+      const k = rs.dataset.railsec; st.railFold[k] = !st.railFold[k];
+      try { localStorage.setItem('relay-rail-fold', JSON.stringify(st.railFold)); } catch { /* blocked */ }
+      renderNav(); return;
+    }
     const nv = e.target.closest('[data-nav]');
     if (nv) { st.nav = nv.dataset.nav; st.sideOpen = false; render(); $('out').scrollTop = 0; return; }
     if (e.target.closest('#menubtn')) { st.sideOpen = true; render(); return; }
@@ -616,7 +635,7 @@ function bindShell() {
     if (hit) { openTicket(hit.id); return; }
     if (j && JIRA_KEY_RE.test(j.key)) createFromJira(j);
   });
-  const setView = (v) => { st.view = v; try { localStorage.setItem('relay-view', v); } catch { /* blocked */ } render(); };
+  const setView = (v) => { st.view = v; try { localStorage.setItem('relay-view-2', v); } catch { /* blocked */ } render(); };
   $('v-list').onclick = () => setView('list');
   $('v-board').onclick = () => setView('board');
   $('newbtn').onclick = () => newTicket();
