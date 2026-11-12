@@ -199,6 +199,32 @@ export function createSupabaseAdapter() {
         await client.from('events').insert({ ticket_id: f.ticket_id, kind: f.kind, body: f.body ?? null, actor: f.actor || 'adam' }).select().single(),
       );
     },
+
+    // Push: this device's row in relay.push_subscriptions, keyed on the endpoint.
+    async savePushSubscription(row) {
+      const { error } = await client.from('push_subscriptions').upsert(row, { onConflict: 'endpoint' });
+      if (error) throw error;
+    },
+    async hasPushSubscription(endpoint) {
+      const { data, error } = await client.from('push_subscriptions').select('id').eq('endpoint', endpoint).limit(1);
+      if (error) throw error;
+      return data.length > 0;
+    },
+    async deletePushSubscription(endpoint) {
+      const { error } = await client.from('push_subscriptions').delete().eq('endpoint', endpoint);
+      if (error) throw error;
+    },
+    // The relay-push function checks the session's JWT and that it is the owner's,
+    // then sends a fixed message to this one registered device.
+    async sendTestPush(endpoint) {
+      const { data, error } = await client.functions.invoke('relay-push', { body: { mode: 'test', endpoint } });
+      if (error) {
+        let detail = '';
+        try { detail = (await error.context?.json())?.error || ''; } catch { /* not JSON */ }
+        throw new Error(detail || error.message);
+      }
+      return data;
+    },
   };
 }
 

@@ -5,6 +5,14 @@ Relay is a single-user projects board: a grouped list and a kanban board of tick
 - Live: https://adamnc02.github.io/relay/
 - Demo (sample data, no sign-in, nothing saved): https://adamnc02.github.io/relay/?demo
 
+## Notifications
+
+Relay can notify a device when a ticket moves to **Waiting for me**: the ticket's ID and title, with the need underneath. Tapping it opens the ticket.
+
+Turn it on from **Notifications** in the rail (on a phone, in the menu): **Turn on**, then **Send test**. On iPhone and iPad this works only in Relay installed on the Home Screen (Safari → Share → Add to Home Screen) and opened from its icon. Each device is turned on separately. Signing out turns notifications off for that device. The demo shows the control but can't turn it on.
+
+A link of the form `https://adamnc02.github.io/relay/?t=KEY` opens the board with ticket KEY open.
+
 ## Run locally
 
 There is no build step. The files at the repo root are what GitHub Pages serves.

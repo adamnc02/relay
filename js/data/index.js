@@ -8,6 +8,8 @@
 //   subscribe(onChange, onStatus) -> unsubscribe
 //   insertProject(f), insertTicket(f), updateTicket(id, patch, ctx), insertEvent(f)
 //     each resolves to a list of changes: { table, type: INSERT|UPDATE|DELETE, row, old? }
+//   savePushSubscription(row), hasPushSubscription(endpoint), deletePushSubscription(endpoint),
+//   sendTestPush(endpoint) -> { devices, sent, gone, failed }
 
 import { createDemoAdapter } from './demo.js';
 import { createSupabaseAdapter } from './supabase.js';

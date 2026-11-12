@@ -12,8 +12,8 @@ js/store.js           in-memory tables + the offline snapshot
 js/model.js           statuses, rollup rule, 14-day rule, Jira parsing, labels
 js/markdown.js        safe markdown subset for briefs
 js/icons.js           Handoff mark, status icons
-js/config.js          Supabase URL + publishable key (public), schema, redirect target
-js/push.js            push seam (not active)
+js/config.js          Supabase URL + publishable key (public), schema, redirect target, VAPID public key
+js/push.js            Web Push: state, turn on/off, send test, forget on sign-out
 js/data/index.js      picks the adapter: ?demo → demo, otherwise supabase
 js/data/demo.js       in-memory adapter that mimics the database triggers
 js/data/sample.js     sample data for ?demo
@@ -31,6 +31,7 @@ The UI talks to one adapter object. Both adapters implement:
 - `loadAll()` → rows of `projects`, `tickets`, `events`, `sessions`, `ticket_files`, `ticket_docs`
 - `subscribe(onChange, onStatus)` → unsubscribe
 - `insertProject`, `insertTicket`, `updateTicket(id, patch, { prevParentId })`, `insertEvent`
+- `savePushSubscription(row)`, `hasPushSubscription(endpoint)`, `deletePushSubscription(endpoint)`, `sendTestPush(endpoint)` (the demo adapter refuses the writes and reports no subscription)
 
 Every write resolves to a list of changes `{ table, type, row, old? }`, which the store applies by primary key. Realtime delivers the same shape, so a change that arrives twice (once from the write's response, once from Realtime) lands once.
 
@@ -107,7 +108,29 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - Same-origin GETs are network-first with `cache: 'no-cache'`, so a new deploy is picked up on the next load; the cache answers only when the network fails. Navigations fall back to the cached `index.html`, which also serves `?demo` offline.
 - Cross-origin requests (the Supabase API, Realtime, Google Fonts) are never intercepted or cached. The only row data on the device is the app's own snapshot.
 
-Push (`push` / `notificationclick` handlers and `js/push.js`) is not active.
+- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing.
+- `notificationclick` closes the notification, writes `{ url, at }` to Cache Storage (`relay-open-intent`, key `__open-intent`), then focuses an open Relay window and posts `{ type: 'relay:open', url }` to it, or opens a new window at the URL. A URL outside the worker's scope is replaced by the scope.
+
+## Push notifications
+
+A notification arrives when a ticket enters **Waiting for me**. The server side is in `silver-octo-invention`: migration `20261112220000_relay_push.sql` (a trigger on `relay.tickets` queues the push in `relay.push_outbox`; never for a parent, whose status is rolled up) and the Edge Function `relay-push`, called every minute by pg_cron while something is queued. See that repo's `docs/relay-SUPABASE.md` → Push.
+
+- **Notification.** Title `<display key> <title>`, body the ticket's need, URL `https://adamnc02.github.io/relay/?t=<display key>`, tag `relay:<ticket id>` (a later entry of the same ticket replaces the earlier notification).
+- **The control.** The rail's **Notifications** row (above the account footer; in the phone drawer) shows On, Off, Blocked or Demo, and opens a panel with Turn on / Turn off, Send test (when on) and the iPhone rule. States from `pushState()`: `demo`, `needs-home-screen` (iOS outside a Home Screen app), `unsupported`, `blocked` (permission denied), `on` (a subscription in this browser **and** its row on the server), `off`, `unknown` (the server check failed).
+- **Turn on** asks for permission first (iOS shows the prompt only from a tap), subscribes with `VAPID_PUBLIC_KEY` from `js/config.js` (the project's key pair; the function signs with the matching private key), and upserts `{ endpoint, p256dh, auth_key, user_agent, failed_count: 0 }` into `relay.push_subscriptions` on `endpoint`. A subscription made with a different key is replaced.
+- **Turn off** deletes this device's row by endpoint and unsubscribes. **Sign out** does the same first (time-boxed to 3 s, never blocking the sign-out), so a signed-out device gets no ticket titles.
+- **Send test** calls `relay-push` with `{ mode: 'test', endpoint }` and the session's JWT; the function sends a fixed message to that one device if the caller is the owner. The toast reports sent, expired (gone), not registered or refused.
+- **Demo.** The control and panel render; the panel says the demo can't subscribe and Turn on is disabled.
+
+### Opening a ticket from a notification
+
+Three routes, because on iOS a tap can reach the page by any one of them or none:
+
+1. **`?t=KEY`** on load. After the board loads, the key (case-insensitive) is matched against `auto_key`, `jira_key`, `display_key` and `aliases`, the ticket panel opens, and `t` is removed from the address (other parameters, such as `demo`, stay). An unknown key shows "KEY isn't on this board."
+2. **`postMessage`** `{ type: 'relay:open', url }` from the worker to an open window.
+3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), then deleted. A note older than 10 minutes is ignored.
+
+If none arrives, the ticket is still in Waiting for me.
 
 ## Markdown
 
@@ -126,6 +149,10 @@ Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the ren
 `icon.svg` is the master (Handoff: `#2A5BD7` tile, white chevron, `#FFAD5C` chevron, rx 112 on 512). `favicon.svg` is the same mark full-bleed. PNGs are rendered from the SVG in headless Chromium: `icon-192.png` (rounded, transparent corners), `icon-512.png` (full-bleed square, `any maskable`, mark inside the 80% safe zone), `apple-touch-icon.png` (180, full-bleed, opaque), `favicon-32.png` (full-bleed, opaque).
 
 ## Traps
+
+- **Notification permission is per origin, the subscription per service worker scope.** Every app on `adamnc02.github.io` shares the permission: a phone that allowed Listly shows no prompt for Relay, and turning notifications off for the site in iOS Settings turns them off for every app there. Relay's subscription and its rows are its own.
+- **A changed `sw.js` can disturb an iPhone's push subscription.** After a worker change, if notifications stop or taps stop opening tickets, turn notifications off and on in the panel and send a test.
+- **One Home Screen icon per app when testing push.** Each icon is its own app, with its own worker, storage and subscription.
 
 - **Enter that opens the panel also closes it.** The panel focuses its close button on open; without `preventDefault()` on the keydown, Chromium delivers the same Enter to that button. Both Enter handlers (search, focused row) prevent the default.
 - **Board columns sized to their text.** `min-width: max-content` on the board grid makes every `minmax(232px, 1fr)` column as wide as its longest unwrapped title (over 500px). The board's min-width is the six 232px minimums plus gaps instead.

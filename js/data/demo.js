@@ -179,6 +179,13 @@ export function createDemoAdapter() {
       return [{ table: 'events', type: 'INSERT', row: clone(e) }];
     },
 
+    // Push needs an account and a server: the demo has neither. The UI shows
+    // the demo state and never calls these.
+    async savePushSubscription() { fail("The demo can't turn notifications on."); },
+    async hasPushSubscription() { return false; },
+    async deletePushSubscription() {},
+    async sendTestPush() { fail("The demo can't send notifications."); },
+
     // Not used by the UI; lets a test simulate a Claude session writing.
     _emit(changes) { listener?.(changes); },
   };
