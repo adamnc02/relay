@@ -14,6 +14,7 @@ Relay is a single-user projects board: a grouped list and a kanban board of tick
 - **All tickets**, and **Archived** (archived tickets only).
 - **Apps**: one row per app project. **Jira**: one row per Jira project, empty until a Jira issue is pasted.
 - **Notifications** (see below) and the account footer with Sign out.
+- The running version in small text at the bottom ("Relay v9"), to check a device has the latest release.
 
 **The toolbar** has search, **List** / **Board** and **+ New**.
 - Search matches Relay IDs, Jira IDs, old IDs (aliases) and titles. Enter on an exact ID opens that ticket. Pasting a Jira issue URL and pressing Enter opens or creates that ticket in its Jira project.
@@ -41,7 +42,7 @@ The demo uses the board's real projects with sample tickets.
 
 ## Notifications
 
-Relay can notify a device when a ticket moves to **Waiting for me**: the ticket's ID and title, with the need underneath. Tapping it opens the ticket, over anything else that is open.
+Relay can notify a device when a ticket moves to **Waiting for me**: the ticket's ID and title, with the need underneath. Tapping it opens the ticket, over anything else that is open. On iPhone, a notification that arrives while Relay is open in front also shows as a banner at the top of Relay, with **Open**, because iOS ignores a tap on the notification then.
 
 Turn it on from **Notifications** in the rail (on a phone, in the menu): **Turn on**, then **Send test**. On iPhone and iPad this works only in Relay installed on the Home Screen (Safari → Share → Add to Home Screen) and opened from its icon. Each device is turned on separately. Signing out turns notifications off for that device. The demo shows the control but can't turn it on.
 
