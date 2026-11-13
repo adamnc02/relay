@@ -9,7 +9,7 @@
 // - Push: 'push' shows the notification the relay-push Edge Function sent;
 //   'notificationclick' opens the ticket (see the end of this file).
 // - 'relay:version' message: replies with VERSION, which the rail shows.
-const VERSION = 'v9';
+const VERSION = 'v10';
 const CACHE = `relay-shell-${VERSION}`;
 const FONT_CACHE = 'relay-fonts';
 const FONT_CSS = 'https://fonts.googleapis.com';
@@ -110,27 +110,27 @@ self.addEventListener('push', (e) => {
       icon: 'icon-192.png',
       data: { url },
     }),
-    tellVisibleWindows({ title, body, url }),
+    tellWindows({ title, body, url }),
   ]));
 });
 
 // iOS doesn't deliver 'notificationclick' for a tap while Relay is in front,
-// so when a Relay window is visible the push is also handed to the page, which
-// shows its own banner: by postMessage, and as a Cache Storage note the page
-// polls (the message can be lost on iOS). No visible window: nothing is written,
-// so a page coming to the front later shows no stale banner.
+// so every push is also handed to the page, which shows its own banner: as a
+// Cache Storage note the page polls, and by postMessage to every Relay window.
+// The page decides whether it was in front when the push arrived (it compares
+// the note's time with when it last came to the front); the worker doesn't,
+// because iOS doesn't report the Home Screen app's window as visible here.
 const PUSH_NOTE_CACHE = 'relay-push-note';
-async function tellVisibleWindows(p) {
+async function tellWindows(p) {
   try {
     const scope = self.registration.scope;
-    const windows = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
-      .filter((c) => c.url.startsWith(scope) && c.visibilityState === 'visible');
-    if (!windows.length) return;
     const msg = { type: 'relay:push', ...p, at: Date.now() };
     const c = await caches.open(PUSH_NOTE_CACHE);
     await c.put(new URL('__push-note', scope).href,
       new Response(JSON.stringify(msg), { headers: { 'Content-Type': 'application/json' } }));
-    windows.forEach((w) => w.postMessage(msg));
+    (await self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+      .filter((w) => w.url.startsWith(scope))
+      .forEach((w) => w.postMessage(msg));
   } catch { /* the notification is still shown */ }
 }
 

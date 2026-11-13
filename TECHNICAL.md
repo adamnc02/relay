@@ -123,7 +123,7 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - **Fonts.** IBM Plex comes from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
 - Every other cross-origin request (the Supabase API, Realtime) is never intercepted or cached. The only row data on the device is the app's own snapshot.
 
-- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. When a Relay window is visible it also hands the push to the page (see "A push while Relay is in front").
+- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. It also hands every push to the page (see "A push while Relay is in front").
 - `message` `{ type: 'relay:version' }` replies on the message's port with `{ version: VERSION }`.
 - `notificationclick` closes the notification, writes `{ url, at }` to Cache Storage (`relay-open-intent`, key `__open-intent`), then focuses an open Relay window and posts `{ type: 'relay:open', url }` to it, or opens a new window at the URL. A URL outside the worker's scope is replaced by the scope.
 
@@ -154,12 +154,14 @@ All three go through `openByKey()`. When the ticket is found it first closes wha
 
 ### A push while Relay is in front
 
-On `push`, if a window inside the worker's scope has `visibilityState` `visible`, the worker also:
+On every `push` the worker also:
 
 - writes `{ type: 'relay:push', title, body, url, at }` to Cache Storage (`relay-push-note`, key `__push-note`), and
-- posts the same object to each visible window.
+- posts the same object to every window inside its scope.
 
-The page shows it as a banner at the top (`#pushbar`): the notification's title and body, **Open** (when the URL carries `?t=KEY`) and ×. **Open** hides the banner and goes through `openByKey()`, so it opens the ticket over any open panel. The note is read on start, on `visibilitychange` (visible) and every 1.5 s while the page is visible, then deleted; one older than 2 minutes is ignored. The message deletes the note, so one push shows one banner. With no visible window nothing is written, so a page coming to the front later shows no banner for a push it wasn't showing.
+The page, not the worker, decides whether it was in front when the push arrived, because iOS doesn't report the Home Screen app's window as `visible` to the worker then (UAT 2026-11-13: no banner when the worker filtered on `visibilityState`). The page keeps `frontSince`, the time it last became visible (`Infinity` while hidden). It shows the push only if the page is visible, `at` is no earlier than `frontSince` minus 4 s (grace, in case iOS briefly hides the page as the notification drops down), and `at` is under 2 minutes old. Anything else is dropped, so a page brought to the front by a tap, or coming back later, shows no banner for an earlier push.
+
+The banner (`#pushbar`) shows the notification's title and body, **Open** (when the URL carries `?t=KEY`) and ×. **Open** hides the banner and goes through `openByKey()`, so it opens the ticket over any open panel. The note is read on start, on `visibilitychange` (visible) and every 1.5 s while the page is visible, then deleted. The message deletes the note, so one push shows one banner.
 
 ## Markdown
 

@@ -14,7 +14,7 @@ Relay is a single-user projects board: a grouped list and a kanban board of tick
 - **All tickets**, and **Archived** (archived tickets only).
 - **Apps**: one row per app project. **Jira**: one row per Jira project, empty until a Jira issue is pasted.
 - **Notifications** (see below) and the account footer with Sign out.
-- The running version in small text at the bottom ("Relay v9"), to check a device has the latest release.
+- The running version in small text at the bottom ("Relay v10"), to check a device has the latest release.
 
 **The toolbar** has search, **List** / **Board** and **+ New**.
 - Search matches Relay IDs, Jira IDs, old IDs (aliases) and titles. Enter on an exact ID opens that ticket. Pasting a Jira issue URL and pressing Enter opens or creates that ticket in its Jira project.
