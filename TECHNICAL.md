@@ -132,6 +132,8 @@ Three routes, because on iOS a tap can reach the page by any one of them or none
 
 If none arrives, the ticket is still in Waiting for me.
 
+A modal open at the time of the tap (such as the Notifications panel) stays open: the ticket panel opens behind it, so the board looks as if the tap only opened the app.
+
 ## Markdown
 
 Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the renderer then produces only headings, paragraphs, bullet and numbered lists, fenced code, inline code, bold, italic and links. Links are kept only for `http:`, `https:` and `mailto:`, and open in a new tab with `rel="noopener noreferrer"`. Link URLs in `links` jsonb follow the same rule.
