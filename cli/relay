@@ -34,7 +34,7 @@ else:
 # Windows: child processes (psql, git) get no console window of their own.
 NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
                     "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
@@ -861,6 +861,7 @@ select json_build_object(
   'ticket', (select json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
                'jira_key', t.jira_key, 'jira_url', t.jira_url, 'aliases', t.aliases, 'title', t.title,
                'status', t.status, 'priority', t.priority, 'need', t.need, 'brief', t.brief,
+               'type', t.type, 'summary_plain', t.summary_plain,
                'next_step', t.next_step, 'phase', t.phase, 'links', t.links, 'updated_by', t.updated_by,
                'needs_wrapup', t.needs_wrapup, 'session_ids', t.session_ids,
                'archived', to_char(t.archived_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
@@ -941,7 +942,7 @@ select coalesce(json_agg(json_build_object('id', p.id, 'key', p.key, 'name', p.n
 SQL_CREATE = """
 with ins as (
   insert into relay.tickets (project_id, title, status, need, brief, next_step, parent_id, phase,
-                             updated_by, session_ids)
+                             updated_by, session_ids, type)
   select :'project_id'::uuid, :'title', :'status'::relay.status,
          case when :'status' = 'waiting' then nullif(:'need', '') else null end,
          :'brief', nullif(:'next', ''), nullif(:'parent_id', '')::uuid,
@@ -949,7 +950,7 @@ with ins as (
               when :'phase' <> '' then nullif(:'phase', '')::smallint
               else (select coalesce(max(c.phase), 0) + 1 from relay.tickets c
                      where c.parent_id = nullif(:'parent_id', '')::uuid) end,
-         :'by', case when :'sid' = '' then '{}'::text[] else array[:'sid'] end
+         :'by', case when :'sid' = '' then '{}'::text[] else array[:'sid'] end, :'type'
   returning id, display_key, auto_key, seq, phase
 ),
 s as (
@@ -1056,6 +1057,20 @@ SQL_NOTE = """
 insert into relay.events (ticket_id, actor, kind, body)
 values (:'tid'::uuid, :'by', 'note', :'body')
 returning json_build_object('at', to_char(at at time zone :'tz', 'YYYY-MM-DD HH24:MI'))
+"""
+
+# The ticket's type: 'dev' or 'bug' (tickets_type_check).
+SQL_TYPE = """
+update relay.tickets set type = :'type', updated_by = :'by'
+ where id = :'tid'::uuid
+returning json_build_object('key', display_key, 'type', type)
+"""
+
+# The plain-English summary the app's Draft update fills its email and Teams templates from.
+SQL_SUMMARY = """
+update relay.tickets set summary_plain = :'text', updated_by = :'by'
+ where id = :'tid'::uuid
+returning json_build_object('key', display_key, 'length', length(summary_plain))
 """
 
 SQL_BRIEF = """
@@ -1428,6 +1443,8 @@ def format_get(d, all_sessions=False):
     head = t["key"] if not t.get("jira_key") else "%s (%s)" % (t["key"], t["auto_key"])
     out.append("# %s · %s" % (head, t["title"]))
     meta = "Project %s (%s) · %s" % (t["project"], t["project_name"], label(t["status"]))
+    if t.get("type") == "bug":
+        meta += " · Bug"
     if d.get("parent"):
         meta += " · phase %s of %s %s" % ("?" if t.get("phase") is None else t["phase"], d["parent"]["key"],
                                            d["parent"]["title"])
@@ -1446,6 +1463,7 @@ def format_get(d, all_sessions=False):
         out.append("Waiting for Adam: " + t["need"])
     if t.get("next_step"):
         out.append("Next step: " + t["next_step"])
+    out.append("Plain summary: " + (t.get("summary_plain") or "(none yet: write one with relay summary)"))
     if t.get("needs_wrapup"):
         out.append("FLAG: closed without wrap-up. Ask Adam whether to mark it done or carry on.")
     if t.get("archived"):
@@ -1705,7 +1723,7 @@ def cmd_create(args):
     brief = read_text_arg(args.brief, "--brief") if args.brief else ""
     v.update({"project_id": proj["id"], "title": args.title, "status": status, "need": args.need or "",
               "brief": brief, "next": args.next_step or "", "parent_id": (parent or {}).get("id", ""),
-              "phase": str(args.phase) if args.phase is not None else ""})
+              "phase": str(args.phase) if args.phase is not None else "", "type": getattr(args, "type", None) or "dev"})
     r = q(SQL_CREATE, v, dry_run=args.dry_run)
     if args.dry_run:
         print("Dry run: every check passed; this would create %s in %s%s. Nothing was saved." % (
@@ -1751,6 +1769,27 @@ def cmd_brief(args):
     v.update({"tid": t["id"], "brief": text.strip() + "\n", "next": args.next_step or ""})
     r = q(SQL_BRIEF, v)
     print("Brief of %s updated (%d characters)." % (r["key"], r["length"]))
+
+
+def cmd_type(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "type": args.type})
+    r = q(SQL_TYPE, v)
+    print("%s is now %s." % (r["key"], "a bug" if r["type"] == "bug" else "dev work"))
+
+
+def cmd_summary(args):
+    sid = session_id(args)
+    t = target(args, sid)
+    text = read_text_arg(" ".join(args.text), "summary").strip()
+    if not text:
+        raise RelayError("summary: give two to four plain-English sentences (- reads stdin)")
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "text": text})
+    r = q(SQL_SUMMARY, v)
+    print("Plain summary of %s updated (%d characters)." % (r["key"], r["length"]))
 
 
 def cmd_session(args):
@@ -2762,11 +2801,18 @@ def build_parser():
     sp.add_argument("--need", help="required with --status waiting")
     sp.add_argument("--brief", help="the brief, or - to read it from stdin")
     sp.add_argument("--next-step")
+    sp.add_argument("--type", choices=("dev", "bug"), default="dev", help="bug for a bug fix (default: dev)")
     sp.add_argument("--no-attach", action="store_true")
     sp.add_argument("--dry-run", action="store_true", help="run every check, then save nothing")
     sp = add("attach", cmd_attach, "Attach this session to a ticket.")
     sp.add_argument("key")
     sp = add("note", cmd_note, "Add a note to the ticket's activity log (- reads stdin).")
+    sp.add_argument("text", nargs="+")
+    sp.add_argument("--key")
+    sp = add("type", cmd_type, "Set the ticket's type: dev or bug.")
+    sp.add_argument("type", choices=("dev", "bug"))
+    sp.add_argument("--key")
+    sp = add("summary", cmd_summary, "Set the ticket's plain-English summary for Draft update (- reads stdin).")
     sp.add_argument("text", nargs="+")
     sp.add_argument("--key")
     sp = add("brief", cmd_brief, "Replace the ticket's brief with stdin.")

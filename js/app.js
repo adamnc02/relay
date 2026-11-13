@@ -25,7 +25,7 @@ const load = (k) => { try { return localStorage.getItem(k); } catch { return nul
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } };
 
 const st = {
-  view: 'board', nav: 'open', collapsed: { done: true }, folded: {}, sideOpen: false,
+  view: 'list', nav: 'open', collapsed: { done: true }, folded: {}, sideOpen: false,
   openId: null, readOnly: false, live: 'connecting', user: null, offlineAt: null, booted: false,
   // This device's notification state, from pushState(); null until checked.
   push: null,
@@ -38,8 +38,9 @@ const st = {
   order: [], // the current view's tickets, in screen order, for Previous / Next
 };
 {
-  // 'relay-view-2': the default became Board, so a List choice saved under the old key doesn't apply.
-  const v = load('relay-view-2');
+  // 'relay-view-3': the default is List, so a choice saved under an earlier key ('relay-view',
+  // 'relay-view-2', from when Board was the default) doesn't apply.
+  const v = load('relay-view-3');
   if (v === 'board' || v === 'list') st.view = v;
   try {
     const f = JSON.parse(load('relay-rail-fold') || 'null');
@@ -1625,7 +1626,7 @@ function bindShell() {
     const o = t.closest('[data-open]');
     if (o) openTicket(o.dataset.open);
   });
-  const setView = (v) => { st.view = v; save('relay-view-2', v); render(); };
+  const setView = (v) => { st.view = v; save('relay-view-3', v); render(); };
   $('v-list').onclick = () => setView('list');
   $('v-board').onclick = () => setView('board');
   $('newbtn').onclick = () => newTicket();
