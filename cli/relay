@@ -1335,13 +1335,19 @@ def target(args, sid):
 
 
 def remember(sid, ticket, cwd=None):
-    """Record session -> ticket locally (the current ticket is the last one attached)."""
+    """Record session -> ticket locally (the current ticket is the last one attached).
+
+    Attaching starts new work, so it clears "closed": a session that ran /close
+    and then attached another ticket is open again, and its SessionEnd hook
+    flags that ticket if the window closes without /close."""
     def put(s):
         lst = [x for x in (s.get("tickets") or []) if x.get("id") != ticket["id"]]
         lst.append({"id": ticket["id"], "key": ticket["key"], "at": time.time()})
         s["tickets"] = lst
         s.setdefault("cwd", cwd or os.getcwd())
         s.pop("ended", None)
+        s.pop("closed", None)
+        s.pop("closed_at", None)
     return update_state(sid, put)
 
 
