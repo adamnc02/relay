@@ -2,14 +2,14 @@
 // - Versioned cache: bump VERSION with any shell change; old caches are deleted on activate.
 // - Same-origin GETs only, network-first, so a new deploy shows up on the next load
 //   and the cached copy is used only when the network fails.
-// - Google Fonts (IBM Plex) is cached in its own cache so the fonts work offline:
+// - Google Fonts (Geist, Geist Mono) is cached in its own cache so the fonts work offline:
 //   the stylesheet network-first, the font files cache-first (their URLs are versioned).
 //   Every other cross-origin request (Supabase API, Realtime) is never intercepted or
 //   cached. The offline copy of row data lives in localStorage, written by the app.
 // - Push: 'push' shows the notification the relay-push Edge Function sent;
 //   'notificationclick' opens the ticket (see the end of this file).
 // - 'relay:version' message: replies with VERSION, which the rail shows.
-const VERSION = 'v13';
+const VERSION = 'v14';
 const CACHE = `relay-shell-${VERSION}`;
 const FONT_CACHE = 'relay-fonts';
 const FONT_CSS = 'https://fonts.googleapis.com';
@@ -26,6 +26,7 @@ const SHELL = [
   './js/icons.js',
   './js/store.js',
   './js/push.js',
+  './js/skills.js',
   './js/data/index.js',
   './js/data/demo.js',
   './js/data/sample.js',

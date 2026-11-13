@@ -21,6 +21,20 @@ export const NEW_JIRA_COLOUR = '#64748B';
 
 export const ts = (v) => (v ? Date.parse(v) : 0);
 
+// Ticket type. A phase has its own; nothing is inherited.
+export const TYPES = [{ id: 'dev', name: 'Dev' }, { id: 'bug', name: 'Bug' }];
+
+// A project wherever it shows with its key: "KEY - Name", or just the key when
+// the name is empty or is the key itself (a Jira project created from a link).
+export function projLabel(p) {
+  if (!p) return '';
+  const n = String(p.name || '').trim();
+  return !n || n.toUpperCase() === String(p.key).toUpperCase() ? p.key : `${p.key} - ${n}`;
+}
+
+// The open tickets the rail counts: not done, not archived, not a parent.
+export const isOpen = (t) => !t.archived_at && t.status !== 'done';
+
 // Archived tickets leave the board at once; done tickets 14 days after done_at.
 export function isHidden(t, now = Date.now()) {
   if (t.archived_at) return true;
@@ -76,9 +90,11 @@ export function friendlyError(e) {
   else if (e?.code === '23505' && /duplicate key/.test(raw)) {
     const d = String(e.details || '').match(/\((\w+)\)=\(([^)]*)\)/);
     m = d ? `${d[2]} is already used${d[1] === 'key' ? ' by another project' : ' by another ticket'}.` : 'That ID is already used by another ticket.';
+  } else if (e?.code === '23001' || (e?.code === '23503' && /project_groups/.test(raw))) {
+    m = 'That group still has projects. Move them out first.';
   } else if (e?.code === '23514' && /violates check constraint/.test(raw)) {
     const c = (raw.match(/constraint "([^"]+)"/) || [])[1] || '';
-    m = /key/.test(c) ? "That isn't a valid key." : /colour/.test(c) ? "That isn't a valid colour." : /title|name/.test(c) ? "The title can't be blank." : "That change isn't allowed.";
+    m = /inbox_ungrouped/.test(c) ? "The Inbox can't go in a group." : /type/.test(c) ? 'A ticket is Dev or Bug.' : /key/.test(c) ? "That isn't a valid key." : /colour/.test(c) ? "That isn't a valid colour." : /title|name/.test(c) ? "The title can't be blank." : "That change isn't allowed.";
   }
   m = m.charAt(0).toUpperCase() + m.slice(1);
   return /[.!?]$/.test(m) ? m : m + '.';

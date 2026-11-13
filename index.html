@@ -5,8 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Relay</title>
 <meta name="description" content="Relay: one board for every Claude session.">
-<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#171E26" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F1F2F4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B0D11" media="(prefers-color-scheme: dark)">
+<script>
+// Appearance before the CSS paints: 'light' and 'dark' set data-theme; 'system' (the default) leaves it unset.
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('relay-theme'); } catch (e) { /* storage blocked */ }
+  if (t === 'light' || t === 'dark') {
+    document.documentElement.dataset.theme = t;
+    var c = t === 'dark' ? '#0B0D11' : '#F1F2F4';
+    document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = c; });
+  }
+})();
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -17,49 +29,41 @@
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" crossorigin href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" crossorigin href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;650;700&family=Geist+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="./app.css">
 </head>
 <body>
 <div class="app" id="app" hidden>
-  <aside class="side" aria-label="Relay navigation">
-    <div class="side-brand"><span data-mark="22" style="display:flex"></span>Relay<button class="iconbtn" id="railclose" aria-label="Close navigation"></button></div>
-    <nav id="nav"></nav>
-    <div class="side-notif" id="sidenotif"></div>
-    <div class="side-foot" id="sidefoot"></div>
-    <div class="side-ver mono" id="sidever"></div>
-  </aside>
+  <aside class="side" id="side" aria-label="Relay navigation"></aside>
   <div class="sidescrim" id="sidescrim" hidden></div>
-  <section class="pane">
+  <section class="pane" id="pane">
     <div class="phead" id="phead">
-    <div class="mbrand"><span data-mark="26" style="display:flex"></span><span>Relay</span></div>
-    <div class="bar">
-      <button class="iconbtn" id="menubtn" aria-label="Open navigation"></button>
-      <div class="bar-title"><h1 id="vtitle">All tickets</h1><span class="n" id="vcount"></span></div>
-      <span class="tag" id="sampletag" hidden>Sample data · edits not saved</span>
-      <span class="spacer"></span>
-      <div class="seg" role="group" aria-label="View">
-        <button id="v-list" aria-pressed="true">List</button>
-        <button id="v-board" aria-pressed="false">Board</button>
+      <div class="mbar">
+        <button class="ib" id="menubtn" aria-label="Open navigation" aria-expanded="false"></button>
+        <span class="spacer"></span>
+        <button class="ib" id="msearch" aria-label="Search"></button>
+        <button class="ib mav" id="mavatar" aria-label="Account menu" aria-haspopup="menu"></button>
       </div>
-      <button class="btn primary" id="newbtn">+ New</button>
-    </div>
-    <div class="bar2">
-      <label class="search" for="q">
-        <svg id="searchicon"></svg>
-        <input id="q" type="search" placeholder="Search IDs or titles: LST-7, BLC-52…" autocomplete="off" aria-label="Search tickets">
-        <kbd>/</kbd>
-      </label>
-    </div>
+      <header class="bar">
+        <div class="bar-title"><span id="vsq"></span><h1 id="vtitle">All tickets</h1><span class="n mono" id="vcount"></span></div>
+        <span class="tag" id="sampletag" hidden>Sample data · edits not saved</span>
+        <span class="spacer"></span>
+        <div class="seg" role="group" aria-label="View">
+          <button id="v-list" aria-pressed="true" aria-label="List"></button>
+          <button id="v-board" aria-pressed="false" aria-label="Board"></button>
+        </div>
+        <button class="btn primary newbtn" id="newbtn"></button>
+      </header>
     </div>
     <div class="ptr" id="ptr" aria-hidden="true"><span class="ptr-in"><i class="ptr-i"></i><span class="ptr-t" id="ptrtext"></span></span></div>
     <div class="offbar" id="offbar" hidden></div>
-    <div class="waitbar" id="waitbar" hidden></div>
     <div class="scroll" id="out"></div>
   </section>
+  <div class="dock" id="drawerhost"></div>
 </div>
+<button class="fab" id="fab" hidden></button>
 <main class="gate" id="gate" hidden></main>
-<div id="drawerhost"></div>
+<div id="pophost"></div>
 <div id="modalhost"></div>
 <div id="toasthost"></div>
 <div class="pushbar" id="pushbar" role="status" hidden></div>

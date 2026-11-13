@@ -1,6 +1,7 @@
 // In-memory adapter for ?demo. No network, no sign-in. It reproduces the
 // database's triggers and checks (ID assignment, done_at, the parent rollup,
-// status events, the waiting-needs-a-need rule, Jira-only-on-Jira-projects)
+// status events, the waiting-needs-a-need rule, Jira-only-on-Jira-projects,
+// the ticket type, project groups and a new project's default group)
 // so the UI behaves exactly as it does against Supabase.
 
 import { buildSample } from './sample.js';
@@ -45,6 +46,7 @@ export function createDemoAdapter() {
   }
 
   function check(t) {
+    if (!['dev', 'bug'].includes(t.type)) fail('A ticket is Dev or Bug.', '23514');
     if (t.status === 'waiting' && !String(t.need || '').trim()) fail('Waiting for me needs a "what I need from you" line.', '23514');
     const p = proj(t.project_id);
     if (!p) fail('Unknown project.');
@@ -90,8 +92,8 @@ export function createDemoAdapter() {
     async signOut() {},
 
     async loadAll() {
-      const { projects, tickets, events, sessions, ticket_files, ticket_docs } = db;
-      return clone({ projects, tickets, events, sessions, ticket_files, ticket_docs });
+      const { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs } = db;
+      return clone({ project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs });
     },
 
     subscribe(onChange, onStatus) {
@@ -103,9 +105,43 @@ export function createDemoAdapter() {
     async insertProject(f) {
       if (!PROJECT_KEY_RE.test(f.key)) fail(`${f.key} can't be a project key (2 to 10 capitals and digits).`, '23514');
       if (db.projects.some((p) => p.key === f.key)) fail(`Project ${f.key} already exists.`, '23505');
-      const p = { id: uuid(), key: f.key, name: f.name, colour: f.colour, kind: f.kind || 'app', jira_base: f.jira_base || null, paths: [], next_seq: 1, archived: false, sort: db.projects.length, created_at: nowIso(), updated_at: nowIso() };
+      const kind = f.kind || 'app';
+      // As projects_a_group: the group for this kind, else the first group by sort. INB stays ungrouped.
+      const groups = db.project_groups.slice().sort((a, b) => (b.default_kind === kind) - (a.default_kind === kind) || a.sort - b.sort);
+      const group_id = f.key === 'INB' ? null : f.group_id || groups[0]?.id || null;
+      const p = { id: uuid(), key: f.key, name: f.name, colour: f.colour, kind, jira_base: f.jira_base || null, paths: [], next_seq: 1, archived: false, sort: db.projects.length, group_id, created_at: nowIso(), updated_at: nowIso() };
       db.projects.push(p);
       return [{ table: 'projects', type: 'INSERT', row: clone(p) }];
+    },
+
+    async updateProject(id, patch) {
+      const p = proj(id);
+      if (!p) fail('Unknown project.');
+      if ('name' in patch && !String(patch.name || '').trim()) fail("The name can't be blank.", '23514');
+      if (patch.group_id && p.key === 'INB') fail("The Inbox can't go in a group.", '23514');
+      for (const k of ['name', 'colour', 'group_id', 'sort']) if (k in patch) p[k] = patch[k];
+      p.updated_at = nowIso();
+      return [{ table: 'projects', type: 'UPDATE', row: clone(p) }];
+    },
+
+    async insertGroup(f) {
+      if (!String(f.name || '').trim()) fail("The name can't be blank.", '23514');
+      const g = { id: uuid(), name: f.name, sort: f.sort ?? 0, default_kind: null, created_at: nowIso(), updated_at: nowIso() };
+      db.project_groups.push(g);
+      return [{ table: 'project_groups', type: 'INSERT', row: clone(g) }];
+    },
+    async updateGroup(id, patch) {
+      const g = db.project_groups.find((x) => x.id === id);
+      if (!g) fail('Unknown group.');
+      if ('name' in patch && !String(patch.name || '').trim()) fail("The name can't be blank.", '23514');
+      for (const k of ['name', 'sort']) if (k in patch) g[k] = patch[k];
+      g.updated_at = nowIso();
+      return [{ table: 'project_groups', type: 'UPDATE', row: clone(g) }];
+    },
+    async deleteGroup(id) {
+      if (db.projects.some((p) => p.group_id === id)) fail('That group still has projects. Move them out first.', '23001');
+      db.project_groups = db.project_groups.filter((g) => g.id !== id);
+      return [{ table: 'project_groups', type: 'DELETE', row: null, old: { id } }];
     },
 
     async insertTicket(f) {
@@ -115,6 +151,7 @@ export function createDemoAdapter() {
       const auto = `${p.key}-${p.kind === 'jira' ? 'R' : ''}${seq}`;
       const t = {
         id: uuid(), project_id: p.id, seq, auto_key: auto, jira_key: f.jira_key || null, jira_url: f.jira_url || null,
+        type: f.type || 'dev', summary_plain: null,
         display_key: f.jira_key || auto, aliases: [], title: f.title, status: f.status || 'backlog', priority: 0,
         need: f.need || null, brief: f.brief || '', next_step: null, parent_id: f.parent_id || null, phase: f.phase ?? null,
         links: {}, updated_by: f.updated_by || 'adam', session_ids: [], needs_wrapup: false, archived_at: null,

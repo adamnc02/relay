@@ -21,6 +21,10 @@ const PROJECTS = [
   ['SUP', 'Supabase', '#475569'],
   ['INB', 'Inbox', '#7A8794'],
 ];
+// Jira projects: [key, name, colour, jira_base]. RP keeps its key as its name, as one created from a pasted link does.
+const JIRA_PROJECTS = [['RP', 'RP', '#64748B', 'https://example.atlassian.net/browse/']];
+// The rail's groups, as the migration seeds them.
+const GROUPS = [['Jira', 10, 'jira'], ['Apps', 20, 'app']];
 
 // [auto_key, status, title, hoursAgo, extra]
 const TICKETS = [
@@ -30,9 +34,9 @@ const TICKETS = [
   ['RLY-4', 'backlog', 'Phase 2: the PWA', 0.2, { parent: 'RLY-1', phase: 2 }],
   ['RLY-5', 'backlog', 'Phase 3: skills, hooks and the handoff import', 0.2, { parent: 'RLY-1', phase: 3 }],
   ['RLY-6', 'backlog', 'Phase 4: push when something needs you', 0.2, { parent: 'RLY-1', phase: 4 }],
-  ['LST-7', 'waiting', 'Shared list invite fails on second device', 1.2, { need: 'Run UAT on phone: open invite link signed in as the second account, confirm the list appears.', next: 'Merge PR #41 once UAT passes.', links: { branch: 'fix/invite-second-device', pr: '#41' } }],
-  ['SFL-14', 'waiting', 'Recurring transfers double-post on month end', 5, { need: "Run the cleanup block in SQL editor (claude_ro can't drop its own UAT policy), then say done.", next: 'Verify 0 rows, then open live PR.', links: { branch: 'fix/month-end-recurring', pr: '#88 (test)' } }],
-  ['PCH-9', 'progress', 'Seed demo data for meal-plan export', 0.3, { next: 'Add three demo recipes with export enabled; UAT on ?demo.', links: { branch: 'feat/mealplan-export' } }],
+  ['LST-7', 'waiting', 'Shared list invite fails on second device', 1.2, { type: 'bug', need: 'Run UAT on phone: open invite link signed in as the second account, confirm the list appears.', next: 'Merge PR #41 once UAT passes.', links: { branch: 'fix/invite-second-device', pr: '#41' }, summary: "A shared list didn't appear when the invite was opened on a second device. We've found the cause and a fix is ready: the app now waits until you're signed in before it opens the invite, so the list appears straight away. I'm testing the fix on a phone today, and once that passes it goes live." }],
+  ['SFL-14', 'waiting', 'Recurring transfers double-post on month end', 5, { type: 'bug', need: "Run the cleanup block in SQL editor (claude_ro can't drop its own UAT policy), then say done.", next: 'Verify 0 rows, then open live PR.', links: { branch: 'fix/month-end-recurring', pr: '#88 (test)' } }],
+  ['PCH-9', 'progress', 'Seed demo data for meal-plan export', 0.3, { summary: 'The demo is getting a few sample recipes so the new meal-plan export can be tried without an account. The recipes are being added now, and the export will be checked on the demo before it goes live.', next: 'Add three demo recipes with export enabled; UAT on ?demo.', links: { branch: 'feat/mealplan-export' } }],
   ['DSK-21', 'progress', 'BYOR: map column picker to SOW fields', 2, { wrapup: true, next: 'Finish field mapping for rate and duration.', links: { branch: 'main' } }],
   ['BLC-50', 'backlog', 'Coach cycle rework (PROMPT-03)', 20, {}],
   ['BLC-56', 'done', "Phase 1: Store cycle dates in the coach's time zone", 6 * 24, { parent: 'BLC-50', phase: 1, links: { pr: '#198' } }],
@@ -48,7 +52,8 @@ const TICKETS = [
   ['SUP-2', 'next', 'Check the push cron after the next migration', 30, { next: 'Run the cron verify file as claude_ro.' }],
   ['PF-5', 'backlog', 'Export the year summary as CSV', 150, {}],
   ['INB-1', 'backlog', 'Sort the loose notes in the tracking folder', 8, {}],
-  ['MDC-3', 'done', 'Booking form zooms on focus in iOS Safari', 18 * 24, { links: { pr: '#9' } }],
+  ['MDC-3', 'done', 'Booking form zooms on focus in iOS Safari', 18 * 24, { type: 'bug', links: { pr: '#9' } }],
+  ['RP-R1', 'next', 'Ribbon chart of stock value on Stock Status', 26, { jira: 'RP-581' }],
 ];
 
 const BRIEFS = {
@@ -149,20 +154,26 @@ const DOCS = {
 export function buildSample(now = Date.now()) {
   const H = 3600e3;
   const iso = (hAgo) => new Date(now - hAgo * H).toISOString();
+  const project_groups = GROUPS.map(([name, sort, default_kind]) => ({ id: uuid(), name, sort, default_kind, created_at: iso(500), updated_at: iso(500) }));
+  const gby = Object.fromEntries(project_groups.map((g) => [g.default_kind, g.id]));
   const projects = PROJECTS.map(([key, name, colour], i) => ({
     id: uuid(), key, name, colour, kind: 'app', jira_base: null, paths: [], next_seq: 1, archived: false, sort: i,
-    created_at: iso(500), updated_at: iso(500),
-  }));
+    group_id: key === 'INB' ? null : gby.app, created_at: iso(500), updated_at: iso(500),
+  })).concat(JIRA_PROJECTS.map(([key, name, colour, jira_base], i) => ({
+    id: uuid(), key, name, colour, kind: 'jira', jira_base, paths: [], next_seq: 1, archived: false, sort: i,
+    group_id: gby.jira, created_at: iso(500), updated_at: iso(500),
+  })));
   const pby = Object.fromEntries(projects.map((p) => [p.key, p]));
   const tickets = [];
   const byKey = {};
   for (const [auto, status, title, hAgo, x] of TICKETS) {
     const [pk, n] = auto.split('-');
     const p = pby[pk];
-    const seq = +n;
+    const seq = +n.replace(/^R/, '');
     p.next_seq = Math.max(p.next_seq, seq + 1);
     const t = {
-      id: uuid(), project_id: p.id, seq, auto_key: auto, jira_key: null, jira_url: null, display_key: auto,
+      id: uuid(), project_id: p.id, seq, auto_key: auto, jira_key: x.jira || null, jira_url: x.jira ? p.jira_base + x.jira : null, display_key: x.jira || auto,
+      type: x.type || 'dev', summary_plain: x.summary || null,
       aliases: [], title, status, priority: 0, need: x.need || null, brief: BRIEFS[auto] || '',
       next_step: x.next || null, parent_id: null, phase: x.phase ?? null, links: x.links || {},
       updated_by: 'claude:sample', session_ids: [], needs_wrapup: !!x.wrapup,
@@ -208,5 +219,5 @@ export function buildSample(now = Date.now()) {
   for (const [k, list] of Object.entries(DOCS)) {
     for (const [path, label] of list) ticket_docs.push({ ticket_id: byKey[k].id, path, label, added_at: iso(10) });
   }
-  return { projects, tickets, events, sessions, ticket_files, ticket_docs, nextEventId: eid };
+  return { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs, nextEventId: eid };
 }
