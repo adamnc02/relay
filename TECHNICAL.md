@@ -123,7 +123,7 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - **Fonts.** IBM Plex comes from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
 - Every other cross-origin request (the Supabase API, Realtime) is never intercepted or cached. The only row data on the device is the app's own snapshot.
 
-- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. It also hands every push to the page (see "A push while Relay is in front").
+- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. It also hands every push to the page for an in-app banner (see "A push while Relay is in front"; it doesn't show on the iPhone).
 - `message` `{ type: 'relay:version' }` replies on the message's port with `{ version: VERSION }`.
 - `notificationclick` closes the notification, writes `{ url, at }` to Cache Storage (`relay-open-intent`, key `__open-intent`), then focuses an open Relay window and posts `{ type: 'relay:open', url }` to it, or opens a new window at the URL. A URL outside the worker's scope is replaced by the scope.
 
@@ -146,7 +146,7 @@ Three routes, because on iOS a tap can reach the page by any one of them or none
 2. **`postMessage`** `{ type: 'relay:open', url }` from the worker to an open window.
 3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), and every 1.5 s while the page is visible, then deleted. A note older than 10 minutes is ignored.
 
-On the iPhone Home Screen app, a tap on a notification while Relay is already in front reaches none of these: iOS doesn't deliver `notificationclick` to the worker then, so no note is written and no message is sent. The in-app banner covers that case.
+On the iPhone Home Screen app, a tap on a notification while Relay is already in front reaches none of these: iOS doesn't deliver `notificationclick` to the worker then, so no note is written and no message is sent. The ticket is still in Waiting for me. The in-app banner below was built for this case but doesn't show on the iPhone.
 
 If none arrives, the ticket is still in Waiting for me.
 
@@ -159,9 +159,11 @@ On every `push` the worker also:
 - writes `{ type: 'relay:push', title, body, url, at }` to Cache Storage (`relay-push-note`, key `__push-note`), and
 - posts the same object to every window inside its scope.
 
-The page, not the worker, decides whether it was in front when the push arrived, because iOS doesn't report the Home Screen app's window as `visible` to the worker then (UAT 2026-11-13: no banner when the worker filtered on `visibilityState`). The page keeps `frontSince`, the time it last became visible (`Infinity` while hidden). It shows the push only if the page is visible, `at` is no earlier than `frontSince` minus 4 s (grace, in case iOS briefly hides the page as the notification drops down), and `at` is under 2 minutes old. Anything else is dropped, so a page brought to the front by a tap, or coming back later, shows no banner for an earlier push.
+The page, not the worker, decides whether it was in front when the push arrived. The page keeps `frontSince`, the time it last became visible (`Infinity` while hidden). It shows the push only if the page is visible, `at` is no earlier than `frontSince` minus 4 s (grace, in case iOS briefly hides the page as the notification drops down), and `at` is under 2 minutes old. Anything else is dropped, so a page brought to the front by a tap, or coming back later, shows no banner for an earlier push.
 
 The banner (`#pushbar`) shows the notification's title and body, **Open** (when the URL carries `?t=KEY`) and ×. **Open** hides the banner and goes through `openByKey()`, so it opens the ticket over any open panel. The note is read on start, on `visibilitychange` (visible) and every 1.5 s while the page is visible, then deleted. The message deletes the note, so one push shows one banner.
+
+**On the iPhone the banner doesn't show.** In the live test on the Home Screen app with Relay in front (2026-11-13), the notification arrived but no banner appeared. That held with both versions: the worker filtering on `visibilityState` (v9), and the worker handing over every push with the page deciding (v10). The cause hasn't been found: either the worker's note or message doesn't reach the page, or the page doesn't pick up the note. On `?demo`, a note written by hand shows the banner. It hasn't been tested with a real push on desktop or Android.
 
 ## Markdown
 
