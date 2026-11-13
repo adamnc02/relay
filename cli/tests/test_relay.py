@@ -572,15 +572,15 @@ class Windows(unittest.TestCase):
 class CreateProject(TempHome):
     """A new ticket goes to --project, else the folder's project, else the Inbox."""
 
-    def run_create(self, project=None, cwd="/Users/a/GitHub/relay"):
+    def run_create(self, project=None, cwd="/Users/a/GitHub/relay", dry_run=False):
         calls = []
         projects = [{"id": "p-rly", "key": "RLY", "name": "Relay", "paths": ["/Users/a/GitHub/relay"]},
                     {"id": "p-inb", "key": "INB", "name": "Inbox", "paths": []}]
 
-        def fake_q(sql, v=None):
+        def fake_q(sql, v=None, timeout=None, dry_run=False):
             if sql == relay.SQL_PROJECTS:
                 return projects
-            calls.append(v)
+            calls.append(dict(v, _dry=dry_run))
             return {"id": "t1", "key": "X-1"}
         saved = (relay.q, relay.norm, relay.common_vars, relay.actor)
         relay.q = fake_q
@@ -590,10 +590,12 @@ class CreateProject(TempHome):
         relay.actor = lambda sid: "claude:test"
         try:
             args = type("A", (), dict(session=None, status=None, need=None, parent=None, project=project,
-                                      no_attach=True, brief=None, title="T", next_step=None, phase=None))()
+                                      no_attach=True, brief=None, title="T", next_step=None, phase=None,
+                                      dry_run=dry_run))()
             relay.cmd_create(args)
         finally:
             relay.q, relay.norm, relay.common_vars, relay.actor = saved
+        self.last = calls[-1]
         return calls[-1]["project_id"]
 
     def test_mapped_folder_uses_its_project(self):
@@ -607,6 +609,130 @@ class CreateProject(TempHome):
 
     def test_named_project_wins(self):
         self.assertEqual(self.run_create(project="rly"), "p-rly")
+
+    def test_dry_run_reaches_the_database_without_saving(self):
+        self.run_create(dry_run=True)
+        self.assertTrue(self.last["_dry"])
+
+
+class Rly18(unittest.TestCase):
+    """RLY-18: Jira parsing, shared Jira keys, value checks, dry runs."""
+
+    def test_parse_jira_matches_the_app(self):
+        j = relay.parse_jira("https://acme.atlassian.net/jira/software/projects/WEB/boards/1?selectedIssue=WEB-500")
+        self.assertEqual((j["key"], j["base"]), ("WEB-500", "https://acme.atlassian.net/browse/"))
+        j = relay.parse_jira("https://acme.atlassian.net/browse/data_x-7")
+        self.assertEqual(j["key"], "DATA_X-7")
+        self.assertEqual(relay.parse_jira("web-12", "https://a/browse/")["url"], "https://a/browse/WEB-12")
+        self.assertIsNone(relay.parse_jira("web-12")["url"])
+        self.assertIsNone(relay.parse_jira("no key here"))
+
+    def test_jira_project_key(self):
+        self.assertEqual(relay.jira_project_key("DATA_PLATFORM_X"), "DATAPLATFO")
+        self.assertEqual(relay.jira_project_key("9X"), "J9X")
+        self.assertEqual(relay.jira_project_key("A"), "AJ")
+
+    def test_shared_jira_key_is_refused_unless_own_id(self):
+        a = {"auto_key": "WEB-R1", "title": "One", "own": False}
+        b = {"auto_key": "WEB-R2", "title": "Two", "own": False}
+        with self.assertRaises(relay.RelayError) as cm:
+            relay.pick_ticket("WEB-500", [a, b])
+        self.assertIn("WEB-R1", str(cm.exception))
+        self.assertIn("WEB-R2", str(cm.exception))
+        self.assertIs(relay.pick_ticket("WEB-500", [a]), a)
+        own = dict(b, own=True)
+        self.assertIs(relay.pick_ticket("WEB-R2", [own, a]), own)
+        self.assertRaises(relay.RelayError, relay.pick_ticket, "WEB-9", [])
+
+    def test_long_jira_prefix_is_a_key(self):
+        self.assertEqual(relay.norm_key("data_platform_x-7"), "DATA_PLATFORM_X-7")
+
+    def test_check_value_names_field_line_and_byte(self):
+        bad = b"line one\nrange 1\x965".decode("utf-8", "surrogateescape")
+        with self.assertRaises(relay.DBError) as cm:
+            relay.check_value("brief", bad)
+        msg = str(cm.exception)
+        self.assertEqual(cm.exception.sqlstate, "22021")
+        for part in ("the brief", "0x96", "line 2", "column 8"):
+            self.assertIn(part, msg)
+        self.assertRaises(relay.DBError, relay.check_value, "need", "a\0b")
+        relay.check_value("brief", "fine \u2013 \u2014 \u2026 \u2192 \U0001F600")
+
+    def test_dry_run_wraps_in_a_rolled_back_transaction(self):
+        seen = {}
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+
+        def fake_run(cmd, input=None, **kw):
+            seen["cmd"], seen["input"] = cmd, input
+            return R()
+        saved = relay.subprocess.run, relay.find_psql
+        relay.subprocess.run, relay.find_psql = fake_run, lambda: "psql"
+        try:
+            relay.psql("insert into x values (:'v');", {"v": "1"}, timeout=5, dry_run=True)
+        finally:
+            relay.subprocess.run, relay.find_psql = saved
+        self.assertNotIn("-1", seen["cmd"])
+        self.assertEqual(seen["input"], "\\set v '1'\nbegin;\ninsert into x values (:'v');\nrollback;\n")
+
+    def test_new_commands_parse(self):
+        p = relay.build_parser()
+        a = p.parse_args(["project", "create", "PAT", "--name", "PBI AI Toolkit", "--path", "/x", "--path", "/y"])
+        self.assertEqual((a.pkey, a.name, a.paths_, a.kind), ("PAT", "PBI AI Toolkit", ["/x", "/y"], "app"))
+        a = p.parse_args(["project", "path", "PAT", "/z", "--remove"])
+        self.assertEqual((a.pkey, a.path, a.remove), ("PAT", "/z", True))
+        a = p.parse_args(["jira", "https://a/browse/WEB-1", "--key", "INB-5", "--dry-run"])
+        self.assertEqual((a.link, a.key, a.dry_run), ("https://a/browse/WEB-1", "INB-5", True))
+        a = p.parse_args(["delete", "INB-6"])
+        self.assertFalse(a.yes)
+        self.assertEqual(p.parse_args(["move", "PAT", "--key", "INB-5"]).project, "PAT")
+
+    def test_project_create_refuses_a_bad_key_before_writing(self):
+        saved = relay.q
+        relay.q = lambda sql, v=None, timeout=None, dry_run=False: [] if sql == relay.SQL_PROJECTS else self.fail("wrote")
+        try:
+            args = relay.build_parser().parse_args(["project", "create", "pbi-ai", "--name", "X"])
+            self.assertRaises(relay.RelayError, relay.cmd_project, args)
+        finally:
+            relay.q = saved
+
+
+class PsqlVariables(unittest.TestCase):
+    """Values reach psql as \\set lines on stdin, never argv (RLY-18: on Windows
+    argv is in the ANSI code page, so en dashes broke every :'name')."""
+
+    def run_psql(self, variables):
+        seen = {}
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+
+        def fake_run(cmd, input=None, **kw):
+            seen["cmd"], seen["input"] = cmd, input
+            return R()
+        saved = relay.subprocess.run, relay.find_psql
+        relay.subprocess.run, relay.find_psql = fake_run, lambda: "psql"
+        try:
+            relay.psql("select :'x';", variables, timeout=5)
+        finally:
+            relay.subprocess.run, relay.find_psql = saved
+        return seen
+
+    def test_values_not_in_argv(self):
+        seen = self.run_psql({"x": "1–5 — …"})
+        self.assertFalse(any("–" in a for a in seen["cmd"]))
+        self.assertEqual(seen["input"], "\\set x '1–5 — …'\nselect :'x';")
+
+    def test_quoting(self):
+        self.assertEqual(relay.psql_quote("it's a\\b\nc\r\td"), "'it\\'s a\\\\b\\nc\\r\\td'")
+        self.assertEqual(relay.psql_quote(""), "''")
+        self.assertNotIn("\n", relay.psql_quote("a\nb"))
+        self.assertRaises(ValueError, relay.psql_quote, "a\0b")
+
+    def test_none_is_empty_and_names_checked(self):
+        self.assertIn("\\set b ''\n", self.run_psql({"b": None})["input"])
+        self.assertRaises(ValueError, self.run_psql, {"Bad-Name": "x"})
 
 
 if __name__ == "__main__":

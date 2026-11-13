@@ -42,8 +42,9 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
    that is clear from the chat or the board (`relay find`). Pass `--project KEY` for it. Without
    `--project`, the working folder's project is used (folder or repo, worktrees included). Only
    when no project fits does the ticket go to the Inbox (`INB`), where Adam files it in the app:
-   into a project, a new project, or a Jira project by linking the Jira issue. Create a new project
-   only when Adam asks.
+   into a project, a new project, or a Jira project by linking the Jira issue. **Only when Adam
+   asks**, do it from the CLI instead: `relay project create KEY --name "…" [--path DIR]`,
+   `relay move KEY --key TICKET`, `relay jira URL --key TICKET`. Add `--dry-run` first when unsure.
 4. **Phased work** is a parent with one child per phase: `relay create "Phase 2: …" --parent RLY-1`
    (the phase number defaults to the next one). A phase can't have phases, and it lives in its
    parent's project. **Never set a parent's status**: the database rolls it up from its phases.
@@ -95,6 +96,9 @@ Then tell Adam the kickoff for the next session: **`Continue KEY.`** (the phase'
 | `relay status S [--need N]`, `relay wait NEED…`, `relay later [--next-step S]`, `relay done` | Set the status (not on a parent) |
 | `relay close done\|later\|wait [--summary S] [--need N] [--next-step S] [--open-items O] [--commit]… [--pr]…` | What /close runs: sweep, flush, session entry with closed_by, status |
 | `relay archive [--undo]` | Hide the ticket now (or bring it back) |
+| `relay delete KEY [--yes]` | Delete a ticket you created by mistake (no phases, under 24 hours old); otherwise archive |
+| `relay project list`, `relay project create KEY --name N [--kind app\|jira] [--path DIR]…`, `relay project path KEY DIR [--remove]` | Projects (create and change only when Adam asks) |
+| `relay move PROJECT`, `relay jira URL\|KEY`, `relay jira --remove` | File the ticket into a project or link it to a Jira issue (only when Adam asks). Several tickets may share one Jira issue |
 | `relay link NAME [URL]`, `relay doc PATH [--label L]` | Links (empty URL removes one) and reference docs |
 | `relay file PATH… [--kind shell]` | Log files changed outside Write/Edit and outside git |
 | `relay notes` | Adam's unseen notes on the attached tickets (marks them seen) |
@@ -102,11 +106,13 @@ Then tell Adam the kickoff for the next session: **`Continue KEY.`** (the phase'
 | `relay doctor` | psql, the database, this session's tickets and the queue |
 
 Every command takes `--key KEY` to act on a ticket other than the current one, and `--session ID`
-outside Claude Code.
+outside Claude Code. `create`, `project create`, `move`, `jira` and `delete` take `--dry-run`: every
+check runs, nothing is saved. Use it to find out why a write fails, never a throwaway ticket.
+Any text works in briefs, needs and notes, en dashes included.
 
 ## Rules the database enforces
 
 A waiting ticket must have a need. A phase's parent has no parent and is in the same project. Jira
 fields exist only on tickets in Jira projects, and Adam's apps never go into Jira. IDs are unique
-across auto keys, Jira keys and aliases. `relay` reports these as "Relay refused this (rule)" or
+across auto keys, Jira keys and aliases, except that several tickets may share one Jira key. `relay` reports these as "Relay refused this (rule)" or
 "(that ID is taken)": fix the input rather than working around the rule.

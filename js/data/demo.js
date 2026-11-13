@@ -58,11 +58,12 @@ export function createDemoAdapter() {
       if (par.project_id !== t.project_id) fail('The parent must be in the same project.', 'P0001');
       if (db.tickets.some((k) => k.parent_id === t.id)) fail("A parent can't become a phase.", 'P0001');
     }
-    const ids = [t.auto_key, t.jira_key, ...(t.aliases || [])].filter(Boolean);
+    // Several tickets may share a jira_key; it still can't be another ticket's auto_key or alias.
+    const own = [t.auto_key, ...(t.aliases || [])].filter(Boolean);
     for (const o of db.tickets) {
       if (o.id === t.id) continue;
-      const theirs = [o.auto_key, o.jira_key, ...(o.aliases || [])];
-      const clash = ids.find((i) => theirs.includes(i));
+      const theirs = [o.auto_key, ...(o.aliases || [])];
+      const clash = own.find((i) => theirs.includes(i) || i === o.jira_key) || (t.jira_key && theirs.includes(t.jira_key) ? t.jira_key : null);
       if (clash) fail(`${clash} is already used by another ticket.`, '23505');
     }
   }

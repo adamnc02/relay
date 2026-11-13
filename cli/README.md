@@ -165,11 +165,16 @@ user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require`, with the password from 
 psql binary. psql is found on `PATH`, then in the Homebrew and Postgres.app locations, because hooks
 can run with a short `PATH`.
 
-Every value is passed as a psql variable (`-v name=value`, used as `:'name'` in SQL read from
-stdin). No value is ever put into SQL text. Calls run with `ON_ERROR_STOP`, in one transaction, and
-with `VERBOSITY=verbose`, so the SQLSTATE comes back: `23514` (a rule, such as a waiting ticket with
-no need or a phase in another project) is reported as "Relay refused this (rule)", and `23505` as
-"(that ID is taken)".
+Every value is passed as a psql variable: a `\set name '…'` line at the top of the SQL psql reads
+from stdin (UTF-8), used as `:'name'`. No value is ever put into SQL text, and none goes on psql's
+command line, where Windows would pass it in the ANSI code page.
+Before sending, each value is checked: a NUL, or a byte that isn't valid UTF-8, is refused with the
+field, line and column (SQLSTATE `22021`, "Relay refused this (text)"), and nothing is saved. Calls
+run with `ON_ERROR_STOP`, in one transaction, and with `VERBOSITY=verbose`, so the SQLSTATE comes
+back: `23514` (a rule, such as a waiting ticket with no need or a phase in another project) is
+reported as "Relay refused this (rule)", and `23505` as "(that ID is taken)". `--dry-run` (on
+`create`, `project create`, `move`, `jira` and `delete`) runs the same SQL, triggers and rules
+included, inside `begin … rollback`, so it reports what would happen and saves nothing.
 
 What the CLI never writes: `events.id` (identity), `tickets.seq`/`auto_key` (assigned by the
 database), or a parent ticket's `status`/`need` (rolled up from its children by a trigger;
@@ -183,7 +188,7 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `context [--cwd DIR]` | The text the SessionStart hook injects (below) |
 | `find TEXT… [--all] [--project KEY]` | IDs, aliases and Jira keys exactly; title and brief by substring. Board tickets only unless `--all` |
 | `get KEY [--all] [--peek]` | Brief; the last 3 sessions (`--all`: every one); files grouped by repo or folder; docs; links; recent activity. A parent shows its plan and every phase's status, and a phase shows its parent's plan and its siblings. Inside a session it marks Adam's unseen notes on the ticket (and its parent) as seen and prints them first, unless `--peek` |
-| `create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--no-attach]` | Inserts a ticket (status `progress` by default). The project is `--project` (passed when the session knows the project), else the parent's, else the working folder's, else `INB`. `--parent` without `--phase` takes the parent's next phase number. Attaches it to the session unless `--no-attach` |
+| `create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--no-attach] [--dry-run]` | Inserts a ticket (status `progress` by default). The project is `--project` (passed when the session knows the project), else the parent's, else the working folder's, else `INB`. `--parent` without `--phase` takes the parent's next phase number. Attaches it to the session unless `--no-attach`. `--dry-run` reports the ID it would get and saves nothing |
 | `attach KEY` | Records session → ticket locally, appends the session ID to `tickets.session_ids`, inserts the `sessions` row, clears `needs_wrapup`, snapshots the ticket's project repos, and flushes the queue |
 | `brief [--key K] [--next-step S]` | Replaces the brief with stdin |
 | `session [--key K] --summary S [--open-items O] [--commit SHA]… [--pr URL]…` | Upserts this session's row: the summary is appended, open items replaced, commits and PRs merged |
@@ -191,6 +196,12 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `status S [--need N] [--next-step S]`, `wait NEED…`, `later [--next-step S]`, `done` | Sets the status. Leaving `waiting` clears `need` |
 | `close done\|later\|wait [--summary S] [--need N] [--next-step S] [--open-items O] [--commit]… [--pr]…` | Sweeps, flushes, upserts the session row with `ended_at` and `closed_by` (`close`, `close-later`, `close-wait`), sets the status (not on a parent), clears `needs_wrapup`, and marks the session closed locally |
 | `archive [--undo]` | Sets or clears `archived_at` and logs an `archive` event |
+| `delete KEY [--yes] [--dry-run]` | Deletes a ticket created by mistake through `relay.delete_ticket()`: only one with no phases, created under 24 hours ago (anything else is archived). Without `--yes` it says what would go. Its notes, sessions, files and docs go with it |
+| `project list` | Every project: key, name, kind, folders |
+| `project create KEY --name N [--kind app\|jira] [--path DIR]… [--jira-base URL] [--dry-run]` | Inserts a project. The key is 2 to 10 capitals or digits, starting with a letter. An app project takes the first unused app colour (as the app does), a Jira project `#64748B`. A folder already claimed by another project is refused. Only when Adam asks |
+| `project path KEY DIR [--remove]` | Adds (or removes) one of the project's folders |
+| `move PROJECT [--key K] [--dry-run]` | Moves the ticket, with its phases, into another project: it is re-keyed there, keeps its old ID as an alias, and an `id` event is logged. A phase moves only with its parent; a Jira-linked ticket only into a Jira project. Only when Adam asks |
+| `jira URL\|KEY [--key K] [--dry-run]`, `jira --remove` | Links the ticket to a Jira issue, as the app does: the Jira project (`jiraProjectKey` of the prefix) is created if missing, with `jira_base` from the URL, and the ticket moves into it with its phases. Only tickets in a Jira project or the Inbox take a link. Several tickets may link one issue; the output names the others. A bare key gets its URL from the project's `jira_base`. Only when Adam asks |
 | `link NAME [URL]` | Sets `links[NAME]` (an empty URL removes it) and logs a `link` event |
 | `doc PATH [--label L]` | Upserts `ticket_docs` |
 | `file PATH… [--kind shell\|write\|edit]` | Logs files now through `relay.log_file` (default kind `shell`) |
@@ -201,7 +212,8 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `setup --src DIR [--claude-dir D] [--bin PATH] [--dry-run]` | What `install.sh` runs |
 
 Commands that act on a ticket default to the session's current ticket (the last one attached) and
-take `--key KEY`. The session ID comes from `--session`, else `RELAY_SESSION_ID` (written by the
+take `--key KEY`. A Jira key linked to several tickets is refused with each ticket's own ID; `get`
+shows the oldest and names the others. The session ID comes from `--session`, else `RELAY_SESSION_ID` (written by the
 SessionStart hook to `CLAUDE_ENV_FILE`), else `CLAUDE_CODE_SESSION_ID` (set by Claude Code in the
 Bash tool's environment).
 

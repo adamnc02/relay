@@ -34,12 +34,18 @@ else:
 # Windows: child processes (psql, git) get no console window of their own.
 NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
                     "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
 TZ = "Europe/London"
-KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,9}-R?[0-9]+$")
+KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]+-R?[0-9]+$")   # an auto key, alias or Jira key
+PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
+JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
+# The app's colours for a new app project (js/app.js APP_COLOURS) and for a Jira project.
+APP_COLOURS = ("#0EA5E9", "#22C55E", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6", "#F97316",
+               "#6366F1", "#84CC16")
+JIRA_COLOUR = "#64748B"
 KICKOFF_RE = re.compile(r"^\s*continue\s+([A-Za-z][A-Za-z0-9_]{1,9}-[Rr]?[0-9]+)\b", re.IGNORECASE)
 STATUSES = ("backlog", "next", "progress", "waiting", "testing", "done")
 LABELS = {"backlog": "Backlog", "next": "Up next", "progress": "In progress",
@@ -408,7 +414,41 @@ PSQL_HINT = ("install PostgreSQL's command-line tools: run the EDB installer fro
              if IS_WIN else "install it: brew install libpq && brew link --force libpq")
 
 
-def psql(sql, variables=None, timeout=None):
+def psql_quote(v):
+    """Quote a value as a single-quoted psql meta-command argument (one line;
+    no variable or backquote expansion happens inside the quotes)."""
+    if "\0" in v:
+        raise ValueError("values can't contain a NUL character")
+    return "'" + (v.replace("\\", "\\\\").replace("'", "\\'").replace("\r", "\\r")
+                  .replace("\n", "\\n").replace("\t", "\\t")) + "'"
+
+
+# What each psql variable is called on the command line, for error messages.
+FIELD_LABELS = {"title": "the title", "brief": "the brief", "need": "--need", "next": "--next-step",
+                "body": "the note", "summary": "--summary", "open": "--open-items", "name": "--name",
+                "url": "the URL", "label": "--label", "path": "the path", "q": "the search text"}
+
+
+def check_value(name, v):
+    """Refuse a value psql can't carry, naming the field, line, column and character:
+    a NUL, or a byte that wasn't valid UTF-8 (read as a lone surrogate)."""
+    for i, ch in enumerate(v):
+        bad = None
+        if ch == "\0":
+            bad = "a NUL character (U+0000)"
+        elif "\ud800" <= ch <= "\udfff":
+            b = ord(ch) - 0xDC00 if ch >= "\udc80" else None
+            bad = ("the byte 0x%02X, which isn't valid UTF-8 (was the text saved in another encoding, "
+                   "such as Windows-1252?)" % b) if b is not None and b >= 0x80 else \
+                "an unpaired surrogate (U+%04X)" % ord(ch)
+        if bad:
+            line = v.count("\n", 0, i) + 1
+            col = i - (v.rfind("\n", 0, i) + 1) + 1
+            raise DBError("%s has %s at line %d, column %d. Nothing was saved." % (
+                FIELD_LABELS.get(name, name), bad, line, col), "22021")
+
+
+def psql(sql, variables=None, timeout=None, dry_run=False):
     """Run SQL (read from stdin by psql, so :'name' variables interpolate) and
     return stdout. Every value goes in as a psql variable, never into the SQL."""
     timeout = timeout if timeout is not None else remaining(20.0)
@@ -417,10 +457,22 @@ def psql(sql, variables=None, timeout=None):
         " connect_timeout=%d application_name=relay-cli" % ct
     cmd = [find_psql(), "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
            "-v", "VERBOSITY=verbose", "-1", "-d", conn, "-f", "-"]
+    # Values go in as \set lines on stdin, never as -v arguments: on Windows psql
+    # gets its argv in the ANSI code page, so an en dash arrives as a lone 0x96
+    # byte, psql can't quote it, leaves :'name' in the SQL and the server reports
+    # 42601 (and characters outside the code page silently become "?").
+    sets = []
     for k, v in sorted((variables or {}).items()):
         if not re.match(r"^[a-z_][a-z0-9_]*$", k):
             raise ValueError("bad psql variable name %r" % k)
-        cmd += ["-v", "%s=%s" % (k, "" if v is None else str(v))]
+        v = "" if v is None else str(v)
+        check_value(k, v)
+        sets.append("\\set %s %s\n" % (k, psql_quote(v)))
+    if dry_run:
+        # Everything runs, triggers and rules included, then rolls back.
+        cmd.remove("-1")
+        sql = "begin;\n" + sql.rstrip().rstrip(";") + ";\nrollback;\n"
+    sql = "".join(sets) + sql
     env = dict(os.environ)
     env.setdefault("PGPASSFILE", norm("~/.pgpass"))
     env["PGCONNECT_TIMEOUT"] = str(ct)
@@ -439,19 +491,27 @@ def psql(sql, variables=None, timeout=None):
     return r.stdout
 
 
-def q(sql, variables=None, timeout=None):
+def q(sql, variables=None, timeout=None, dry_run=False):
     """psql that returns one JSON value."""
-    out = psql(sql, variables, timeout).strip()
+    out = psql(sql, variables, timeout, dry_run).strip()
     if not out:
         return None
     return json.loads(out)
 
 
 def explain_db(e):
+    if "tickets_jira_key_key" in str(e):
+        return ("Relay refused this: another ticket already links that Jira issue, and this database still "
+                "allows only one. Apply silver-octo-invention's migration 20261113160000_relay_shared_jira_delete.sql")
     if e.sqlstate == "23514":
         return "Relay refused this (rule): %s" % e
     if e.sqlstate == "23505":
         return "Relay refused this (that ID is taken): %s" % e
+    if e.sqlstate == "22021":
+        return "Relay refused this (text): %s" % e
+    if e.sqlstate == "42883" and "delete_ticket" in str(e):
+        return ("this database has no relay.delete_ticket() yet: apply silver-octo-invention's migration "
+                "20261113160000_relay_shared_jira_delete.sql")
     if e.sqlstate:
         return "Relay error %s: %s" % (e.sqlstate, e)
     return "can't reach Relay: %s" % e
@@ -757,6 +817,8 @@ def last_assistant_text(path, max_bytes=3000000):
 # ---------------------------------------------------------------------------
 
 RESOLVE = "(t.auto_key = :'key' or t.jira_key = :'key' or :'key' = any (t.aliases))"
+# A Jira key may be shared by several tickets: a ticket's own ID wins, then the oldest.
+RESOLVE_ORDER = "order by (t.auto_key = :'key' or :'key' = any (t.aliases)) desc, t.created_at"
 
 SQL_CONTEXT = """
 select json_build_object(
@@ -784,7 +846,7 @@ select json_build_object(
 """
 
 SQL_GET = """
-with t as (select * from relay.tickets t where """ + RESOLVE + """ limit 1),
+with t as (select * from relay.tickets t where """ + RESOLVE + " " + RESOLVE_ORDER + """ limit 1),
 fam as (select c.id from relay.tickets c join t on c.parent_id = t.id union select id from t),
 seen as (
   update relay.events e set seen_at = now()
@@ -794,6 +856,8 @@ seen as (
   returning e.id, e.ticket_id, e.at, e.body
 )
 select json_build_object(
+  'shared', (select coalesce(json_agg(json_build_object('key', o.auto_key, 'title', o.title) order by o.created_at), '[]')
+               from relay.tickets o, t where t.jira_key is not null and o.jira_key = t.jira_key and o.id <> t.id),
   'ticket', (select json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
                'jira_key', t.jira_key, 'jira_url', t.jira_url, 'aliases', t.aliases, 'title', t.title,
                'status', t.status, 'priority', t.priority, 'need', t.need, 'brief', t.brief,
@@ -855,11 +919,19 @@ select coalesce(json_agg(x.j order by x.exact desc, x.updated desc), '[]') from 
 """
 
 SQL_RESOLVE = """
-select json_build_object('id', t.id, 'key', t.display_key, 'title', t.title, 'status', t.status,
-  'project_id', t.project_id, 'parent_id', t.parent_id,
-  'children', (select count(*) from relay.tickets c where c.parent_id = t.id))
-from relay.tickets t where """ + RESOLVE + """ limit 1
+select coalesce(json_agg(json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
+  'title', t.title, 'status', t.status, 'project_id', t.project_id, 'parent_id', t.parent_id,
+  'jira_key', t.jira_key, 'jira_url', t.jira_url, 'archived', t.archived_at is not null,
+  'created', to_char(t.created_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
+  'young', t.created_at > now() - interval '24 hours',
+  'own', (t.auto_key = :'key' or :'key' = any (t.aliases)),
+  'children', (select count(*) from relay.tickets c where c.parent_id = t.id),
+  'sessions', (select count(*) from relay.sessions s where s.ticket_id = t.id),
+  'files', (select count(*) from relay.ticket_files f where f.ticket_id = t.id))
+  """ + RESOLVE_ORDER + """), '[]')
+from relay.tickets t where """ + RESOLVE + """
 """
+SQL_RESOLVE_ID = SQL_RESOLVE.replace("where " + RESOLVE, "where t.id = :'tid'::uuid")
 
 SQL_PROJECTS = """
 select coalesce(json_agg(json_build_object('id', p.id, 'key', p.key, 'name', p.name, 'paths', p.paths,
@@ -891,7 +963,7 @@ select json_build_object('id', id, 'key', display_key, 'auto_key', auto_key, 'se
 """
 
 SQL_ATTACH = """
-with t as (select t.id from relay.tickets t where """ + RESOLVE + """ limit 1),
+with t as (select t.id from relay.tickets t where """ + RESOLVE + " " + RESOLVE_ORDER + """ limit 1),
 u as (
   update relay.tickets x
      set session_ids = case when :'sid' = any (x.session_ids) then x.session_ids else x.session_ids || :'sid'::text end,
@@ -1026,6 +1098,55 @@ e as (insert into relay.events (ticket_id, actor, kind, body)
 select json_build_object('key', (select display_key from u),
                          'archived', (select archived_at is not null from u), 'event', (select count(*) from e))
 """
+
+SQL_PROJECT_CREATE = """
+insert into relay.projects (key, name, colour, kind, jira_base, paths)
+values (:'pkey', :'name', :'colour', :'kind'::relay.project_kind, nullif(:'jira_base', ''),
+        array(select json_array_elements_text(:'paths'::json)))
+returning json_build_object('id', id, 'key', key, 'name', name, 'kind', kind, 'colour', colour, 'paths', paths)
+"""
+
+SQL_PROJECT_PATH = """
+update relay.projects
+   set paths = case when :'remove' = '1' then array_remove(paths, :'path')
+                    when :'path' = any (paths) then paths else paths || :'path'::text end
+ where key = :'pkey'
+returning json_build_object('key', key, 'paths', paths)
+"""
+
+SQL_MOVE = """
+with u as (
+  update relay.tickets set project_id = :'pid'::uuid, updated_by = :'by'
+   where id = :'tid'::uuid
+  returning id, display_key
+),
+e as (insert into relay.events (ticket_id, actor, kind, body)
+      select id, :'by', 'id', :'body' || display_key || '.' from u
+      returning 1)
+select json_build_object('key', (select display_key from u), 'event', (select count(*) from e))
+"""
+
+# Links (or with an empty jkey, unlinks) a Jira issue. A missing Jira project is
+# created first, in its own statement, so the ticket update sees it.
+SQL_JIRA = """
+insert into relay.projects (key, name, colour, kind, jira_base)
+select :'pkey', :'pname', :'colour', 'jira', nullif(:'base', '') where :'newproj' = '1';
+with u as (
+  update relay.tickets x
+     set jira_key = nullif(:'jkey', ''), jira_url = nullif(:'jurl', ''),
+         project_id = coalesce((select p.id from relay.projects p where p.key = :'pkey'), x.project_id),
+         updated_by = :'by'
+   where x.id = :'tid'::uuid
+  returning x.id, x.display_key, x.auto_key, x.project_id
+),
+e as (insert into relay.events (ticket_id, actor, kind, body) select id, :'by', 'id', :'body' from u returning 1)
+select json_build_object('key', u.display_key, 'auto_key', u.auto_key,
+  'project', (select p.key from relay.projects p where p.id = u.project_id),
+  'shared', (select coalesce(json_agg(o.auto_key order by o.created_at), '[]') from relay.tickets o
+              where :'jkey' <> '' and o.jira_key = :'jkey' and o.id <> u.id)) from u
+"""
+
+SQL_DELETE = "select relay.delete_ticket(:'tid'::uuid)"
 
 SQL_NOTES = """
 with n as (
@@ -1304,7 +1425,8 @@ def merge_files(rows):
 def format_get(d, all_sessions=False):
     t = d["ticket"]
     out = []
-    out.append("# %s · %s" % (t["key"], t["title"]))
+    head = t["key"] if not t.get("jira_key") else "%s (%s)" % (t["key"], t["auto_key"])
+    out.append("# %s · %s" % (head, t["title"]))
     meta = "Project %s (%s) · %s" % (t["project"], t["project_name"], label(t["status"]))
     if d.get("parent"):
         meta += " · phase %s of %s %s" % ("?" if t.get("phase") is None else t["phase"], d["parent"]["key"],
@@ -1317,6 +1439,9 @@ def format_get(d, all_sessions=False):
         out.append("Also known as: " + ", ".join(t["aliases"]))
     if t.get("jira_url"):
         out.append("Jira: " + t["jira_url"])
+    if d.get("shared"):
+        out.append("Also linked to %s: %s" % (t.get("jira_key"), "; ".join(
+            "%s \"%s\"" % (o["key"], o["title"]) for o in d["shared"])))
     if t.get("status") == "waiting" and t.get("need"):
         out.append("Waiting for Adam: " + t["need"])
     if t.get("next_step"):
@@ -1438,10 +1563,31 @@ def norm_key(key):
 
 
 def resolve(key):
-    t = q(SQL_RESOLVE, {"key": norm_key(key)})
-    if not t:
-        raise RelayError("no ticket %s" % norm_key(key))
-    return t
+    """One ticket for an ID, alias or Jira key. A Jira key shared by several
+    tickets is refused, naming each ticket's own ID."""
+    k = norm_key(key)
+    rows = q(SQL_RESOLVE, {"key": k, "tz": TZ}) or []
+    return pick_ticket(k, rows)
+
+
+def full_target(args, sid):
+    """target(), with every field resolve() gives (the session's ticket is looked up by id)."""
+    if getattr(args, "key", None):
+        return resolve(args.key)
+    t = target(args, sid)
+    rows = q(SQL_RESOLVE_ID, {"tid": t["id"], "key": "", "tz": TZ}) or []
+    if not rows:
+        raise RelayError("the session's ticket %s is no longer in Relay" % t.get("key"))
+    return rows[0]
+
+
+def pick_ticket(k, rows):
+    if not rows:
+        raise RelayError("no ticket %s" % k)
+    if rows[0].get("own") or len(rows) == 1:
+        return rows[0]
+    raise RelayError("%s is linked to %d tickets: %s. Use the ticket's own ID." % (
+        k, len(rows), "; ".join("%s \"%s\"" % (r["auto_key"], r["title"]) for r in rows)))
 
 
 def target(args, sid):
@@ -1483,7 +1629,8 @@ def read_text_arg(value, label_):
 
 def do_attach(key, sid, cwd):
     v = common_vars(sid, cwd)
-    v["key"] = norm_key(key)
+    # Resolve first, so a Jira key shared by several tickets is refused, not guessed.
+    v["key"] = resolve(key)["auto_key"]
     t = q(SQL_ATTACH, v)
     if not t:
         raise RelayError("no ticket %s" % v["key"])
@@ -1530,6 +1677,8 @@ def cmd_get(args):
 def cmd_create(args):
     sid = session_id(args)
     cwd = norm(os.getcwd())
+    if not args.title.strip():
+        raise RelayError("the title is empty")
     status = args.status or "progress"
     if status == "waiting" and not args.need:
         raise RelayError("a waiting ticket needs --need \"what you need from Adam\"")
@@ -1550,14 +1699,18 @@ def cmd_create(args):
         proj, _ = project_for(cwd, projects)
         if not proj:
             raise RelayError("no Inbox project (INB); pass --project KEY")
-    attach = sid and not args.no_attach
+    attach = sid and not args.no_attach and not args.dry_run
     v = common_vars(sid if attach else "", cwd)
     v["by"] = actor(sid)
     brief = read_text_arg(args.brief, "--brief") if args.brief else ""
     v.update({"project_id": proj["id"], "title": args.title, "status": status, "need": args.need or "",
               "brief": brief, "next": args.next_step or "", "parent_id": (parent or {}).get("id", ""),
               "phase": str(args.phase) if args.phase is not None else ""})
-    r = q(SQL_CREATE, v)
+    r = q(SQL_CREATE, v, dry_run=args.dry_run)
+    if args.dry_run:
+        print("Dry run: every check passed; this would create %s in %s%s. Nothing was saved." % (
+            r["key"], proj["key"], " as phase %s of %s" % (r.get("phase"), parent["key"]) if parent else ""))
+        return
     msg = "Created %s in %s" % (r["key"], proj["key"])
     if parent:
         msg += " as phase %s of %s" % (r.get("phase"), parent["key"])
@@ -1661,6 +1814,212 @@ def cmd_link(args):
     v.update({"tid": t["id"], "name": args.name, "url": args.url or ""})
     r = q(SQL_LINK, v)
     print("%s links: %s" % (r["key"], json.dumps(r["links"])))
+
+
+def find_project(projects, key):
+    k = (key or "").strip().upper()
+    p = next((x for x in projects if x["key"] == k), None)
+    if not p:
+        raise RelayError("no project %s (relay project list shows them)" % k)
+    return p
+
+
+def project_colour(projects, kind):
+    if kind == "jira":
+        return JIRA_COLOUR
+    used = {str(p.get("colour") or "").upper() for p in projects}
+    return next((c for c in APP_COLOURS if c not in used), APP_COLOURS[len(projects) % len(APP_COLOURS)])
+
+
+def folder(path):
+    return norm(os.path.abspath(os.path.expanduser(path)))
+
+
+def cmd_project(args):
+    if args.action == "list":
+        for p in q(SQL_PROJECTS) or []:
+            line = "%s · %s · %s" % (p["key"], p["name"], p["kind"])
+            if p.get("archived"):
+                line += " · archived"
+            if p.get("paths"):
+                line += " · " + ", ".join(p["paths"])
+            print(line)
+        return
+    projects = q(SQL_PROJECTS) or []
+    key = (args.pkey or "").strip().upper()
+    if args.action == "path":
+        p = find_project(projects, key)
+        path = folder(args.path)
+        if not args.remove:
+            other = next((x for x in projects if x["id"] != p["id"] and path in (x.get("paths") or [])), None)
+            if other:
+                raise RelayError("%s is already a folder of %s" % (path, other["key"]))
+        r = q(SQL_PROJECT_PATH, {"pkey": p["key"], "path": path, "remove": "1" if args.remove else ""})
+        print("%s folders: %s" % (r["key"], ", ".join(r["paths"]) or "none"))
+        return
+    # create
+    if not PROJECT_KEY_RE.match(key):
+        raise RelayError("%r can't be a project key: use 2 to 10 capitals or digits, starting with a letter" % args.pkey)
+    if any(p["key"] == key for p in projects):
+        raise RelayError("project %s already exists" % key)
+    name = (args.name or "").strip()
+    if not name:
+        raise RelayError("a project needs --name")
+    if args.jira_base and args.kind != "jira":
+        raise RelayError("--jira-base is only for --kind jira")
+    paths = []
+    for raw in args.paths_ or []:
+        path = folder(raw)
+        other = next((x for x in projects if path in (x.get("paths") or [])), None)
+        if other:
+            raise RelayError("%s is already a folder of %s" % (path, other["key"]))
+        if path not in paths:
+            paths.append(path)
+    base = args.jira_base or ""
+    if base:
+        j = parse_jira(base + ("" if base.endswith("/") else "/") + "X-1")
+        base = j["base"] if j and j.get("base") else base
+    v = {"pkey": key, "name": name, "colour": project_colour(projects, args.kind), "kind": args.kind,
+         "jira_base": base, "paths": json.dumps(paths)}
+    r = q(SQL_PROJECT_CREATE, v, dry_run=args.dry_run)
+    what = "%s · %s (%s, %s)%s" % (r["key"], r["name"], r["kind"], r["colour"],
+                                   " · " + ", ".join(r["paths"]) if r.get("paths") else "")
+    print(("Dry run: every check passed; this would create project %s. Nothing was saved." if args.dry_run
+           else "Created project %s.") % what)
+
+
+def cmd_move(args):
+    sid = session_id(args)
+    t = full_target(args, sid)
+    projects = q(SQL_PROJECTS) or []
+    to = find_project(projects, args.project)
+    frm = next(p for p in projects if p["id"] == t["project_id"])
+    if to["id"] == frm["id"]:
+        print("%s is already in %s." % (t["key"], to["key"]))
+        return
+    if t.get("parent_id"):
+        raise RelayError("%s is a phase: it moves only with its parent" % t["key"])
+    if to.get("archived"):
+        raise RelayError("project %s is archived" % to["key"])
+    if t.get("jira_key") and to["kind"] != "jira":
+        raise RelayError("%s is linked to Jira, so it can only go into a Jira project. "
+                         "Remove the link first: relay jira --remove --key %s" % (t["key"], t["auto_key"]))
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "pid": to["id"], "body": "Moved from %s to %s%s. %s is now " % (
+        frm["key"], to["key"], " with its phases" if t.get("children") else "", t["key"])})
+    r = q(SQL_MOVE, v, dry_run=args.dry_run)
+    if args.dry_run:
+        print("Dry run: every check passed; %s would become %s. Nothing was saved." % (t["key"], r["key"]))
+        return
+    print("Moved %s from %s to %s%s: now %s." % (t["key"], frm["key"], to["key"],
+                                                 " with its phases" if t.get("children") else "", r["key"]))
+
+
+def parse_jira(raw, base=None):
+    """The Jira key in a pasted URL (?selectedIssue=, /browse/, or anywhere) or a bare
+    key, as js/model.js parseJira: {key, url, base}. A bare key's url comes from base."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    k = r"([A-Za-z][A-Za-z0-9_]+-\d+)"
+    m = re.search(r"[?&]selectedIssue=" + k, s) or re.search("/browse/" + k, s) or re.search(r"\b" + k + r"\b", s)
+    if not m:
+        return None
+    key = m.group(1).upper()
+    if re.match(r"^https?://", s, re.IGNORECASE):
+        o = re.match(r"^(https?://[^/?#]+)", s, re.IGNORECASE)
+        return {"key": key, "url": s, "base": o.group(1) + "/browse/" if o else None}
+    return {"key": key, "url": base + key if base else None, "base": base}
+
+
+def jira_project_key(prefix):
+    """A Jira prefix may contain '_' or run past 10 characters; a Relay project key may not."""
+    k = re.sub(r"[^A-Z0-9]", "", (prefix or "").upper())[:10]
+    if not re.match(r"^[A-Z]", k):
+        k = ("J" + k)[:10]
+    if len(k) < 2:
+        k = (k + "J")[:10]
+    return k
+
+
+def cmd_jira(args):
+    sid = session_id(args)
+    t = full_target(args, sid)
+    v = common_vars(sid)
+    v.update({"tid": t["id"], "newproj": "", "pname": "", "base": "", "colour": JIRA_COLOUR})
+    if args.remove:
+        if not t.get("jira_key"):
+            print("%s has no Jira link." % t["key"])
+            return
+        v.update({"jkey": "", "jurl": "", "pkey": "", "body": "Removed Jira link."})
+        r = q(SQL_JIRA, v, dry_run=args.dry_run)
+        print("%sRemoved the Jira link from %s: now %s." % ("Dry run (nothing saved): " if args.dry_run else "",
+                                                           t["key"], r["key"]))
+        return
+    if not args.link:
+        raise RelayError("pass the Jira issue URL or key, or --remove")
+    projects = q(SQL_PROJECTS) or []
+    cur = next((p for p in projects if p["id"] == t["project_id"]), {})
+    if cur.get("kind") != "jira" and cur.get("key") != "INB":
+        # As in the app: only Jira and Inbox tickets take a Jira link; apps never go into Jira.
+        raise RelayError("%s is in app project %s, and app tickets never go into Jira. Only tickets in a "
+                         "Jira project or the Inbox take a Jira link." % (t["key"], cur.get("key")))
+    prefix_guess = parse_jira(args.link)
+    if not prefix_guess or not JIRA_KEY_RE.match(prefix_guess["key"]):
+        raise RelayError("no Jira key in %r: pass the issue URL or a key like WEB-500" % args.link)
+    prefix = prefix_guess["key"].rsplit("-", 1)[0]
+    pkey = jira_project_key(prefix)
+    proj = next((p for p in projects if p["key"] == pkey), None)
+    j = parse_jira(args.link, (proj or {}).get("jira_base"))
+    if proj and proj["kind"] != "jira":
+        raise RelayError("%s is an app project, so it can't take a Jira link" % pkey)
+    if not proj and not PROJECT_KEY_RE.match(pkey):
+        raise RelayError("%s can't be used as a Relay project key" % prefix)
+    if t.get("jira_key") == j["key"] and (t.get("jira_url") or "") == (j["url"] or t.get("jira_url") or ""):
+        print("%s is already linked to %s." % (t["auto_key"], j["key"]))
+        return
+    moved = ""
+    if not proj:
+        moved += " Created Jira project %s." % pkey
+        v.update({"newproj": "1", "pname": prefix, "base": j.get("base") or ""})
+    if not proj or proj["id"] != t["project_id"]:
+        if t.get("parent_id"):
+            raise RelayError("%s belongs to project %s, and a phase can't move project without its parent"
+                             % (j["key"], pkey))
+        moved += " Moved to %s%s." % (pkey, " with its phases" if t.get("children") else "")
+    v.update({"jkey": j["key"], "jurl": j.get("url") or t.get("jira_url") or "", "pkey": pkey,
+              "body": "Linked Jira %s. Display ID is now %s.%s" % (j["key"], j["key"], moved)})
+    r = q(SQL_JIRA, v, dry_run=args.dry_run)
+    msg = "Linked %s to %s (its own ID: %s).%s" % (t["key"], j["key"], r["auto_key"], moved)
+    if r.get("shared"):
+        msg += " %s is also linked to %s." % (j["key"], ", ".join(r["shared"]))
+    if not v["jurl"]:
+        msg += " No Jira URL known for %s yet: pass the full issue URL to make it a link." % pkey
+    print(("Dry run (nothing saved): " if args.dry_run else "") + msg)
+
+
+def cmd_delete(args):
+    sid = session_id(args)
+    t = resolve(args.key)
+    what = "%s \"%s\" (created %s; %d session(s), %d file(s) logged)" % (
+        t["auto_key"], t["title"], t["created"], t["sessions"], t["files"])
+    if t["children"]:
+        raise RelayError("%s has %d phase(s): delete or move them first" % (t["key"], t["children"]))
+    if not t["young"]:
+        raise RelayError("%s was created more than 24 hours ago; archive it instead: relay archive --key %s"
+                         % (t["key"], t["auto_key"]))
+    if not args.yes and not args.dry_run:
+        print("Would delete %s with its notes, sessions, files and docs. This can't be undone. "
+              "Run again with --yes to delete it." % what)
+        return
+    q(SQL_DELETE, {"tid": t["id"]}, dry_run=args.dry_run)
+    if args.dry_run:
+        print("Dry run: every check passed; %s can be deleted. Nothing was deleted." % what)
+        return
+    if sid:
+        update_state(sid, lambda s: s.update(
+            {"tickets": [x for x in (s.get("tickets") or []) if x.get("id") != t["id"]]}))
+    print("Deleted %s." % what)
 
 
 def cmd_doc(args):
@@ -2404,6 +2763,7 @@ def build_parser():
     sp.add_argument("--brief", help="the brief, or - to read it from stdin")
     sp.add_argument("--next-step")
     sp.add_argument("--no-attach", action="store_true")
+    sp.add_argument("--dry-run", action="store_true", help="run every check, then save nothing")
     sp = add("attach", cmd_attach, "Attach this session to a ticket.")
     sp.add_argument("key")
     sp = add("note", cmd_note, "Add a note to the ticket's activity log (- reads stdin).")
@@ -2438,6 +2798,33 @@ def build_parser():
     sp.add_argument("name")
     sp.add_argument("url", nargs="?", default="")
     sp.add_argument("--key")
+    sp = add("project", cmd_project, "List projects, create one, or add or remove a project's folder "
+             "(create and path only when Adam asks).")
+    sp.add_argument("action", choices=("list", "create", "path"))
+    sp.add_argument("pkey", nargs="?", metavar="KEY", help="the project key (create, path)")
+    sp.add_argument("path", nargs="?", help="the folder (path)")
+    sp.add_argument("--name", help="the project's name (create)")
+    sp.add_argument("--kind", choices=("app", "jira"), default="app")
+    sp.add_argument("--path", dest="paths_", action="append", metavar="FOLDER",
+                    help="a folder that belongs to the project (create; repeatable)")
+    sp.add_argument("--jira-base", help="the Jira site, e.g. https://acme.atlassian.net (create --kind jira)")
+    sp.add_argument("--remove", action="store_true", help="remove the folder (path)")
+    sp.add_argument("--dry-run", action="store_true", help="run every check, then save nothing")
+    sp = add("move", cmd_move, "Move the ticket (and its phases) into another project (only when Adam asks).")
+    sp.add_argument("project")
+    sp.add_argument("--key")
+    sp.add_argument("--dry-run", action="store_true", help="run every check, then save nothing")
+    sp = add("jira", cmd_jira, "Link the ticket to a Jira issue (URL or key), moving it into that Jira "
+             "project; --remove unlinks it (only when Adam asks).")
+    sp.add_argument("link", nargs="?")
+    sp.add_argument("--key")
+    sp.add_argument("--remove", action="store_true")
+    sp.add_argument("--dry-run", action="store_true", help="run every check, then save nothing")
+    sp = add("delete", cmd_delete, "Delete a ticket created by mistake (no phases, under 24 hours old); "
+             "anything else is archived.")
+    sp.add_argument("key")
+    sp.add_argument("--yes", action="store_true", help="really delete it (without this, says what would go)")
+    sp.add_argument("--dry-run", action="store_true", help="run every check, then delete nothing")
     sp = add("doc", cmd_doc, "Add a reference document (a path on disk).")
     sp.add_argument("path")
     sp.add_argument("--label")
