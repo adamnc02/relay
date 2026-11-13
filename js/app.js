@@ -387,8 +387,8 @@ function openPending() {
 // The service worker also writes a tapped notification's URL to Cache Storage,
 // because on iOS a tap can reach the page without the URL or the message. Read
 // on start, whenever the page comes to the front, and every 1.5 s while it is
-// visible (a tap on iOS while Relay is already in front fires none of the
-// front-coming events, and the worker's message can be lost), then deleted.
+// visible, then deleted. (A tap on iOS while Relay is already in front reaches
+// the worker not at all; the push banner below covers that case.)
 const OPEN_NOTE_CACHE = 'relay-open-intent';
 let checkingNote = false;
 async function checkOpenNote() {
@@ -403,6 +403,66 @@ async function checkOpenNote() {
     const n = await r.json();
     if (Date.now() - (n.at || 0) < 10 * 60e3) openByKey(ticketParam(n.url));
   } catch { /* storage blocked */ } finally { checkingNote = false; }
+}
+
+// A push that arrives while Relay is visible: the worker posts it and writes a
+// Cache Storage note (read on the same schedule as the open-intent note). iOS
+// doesn't report a tap on the notification then, so the page shows a banner.
+const PUSH_NOTE_CACHE = 'relay-push-note';
+const pushNoteKey = () => new URL('./__push-note', location.href).href;
+let checkingPush = false;
+async function checkPushNote() {
+  if (!st.booted || typeof caches === 'undefined' || checkingPush) return;
+  checkingPush = true;
+  try {
+    const c = await caches.open(PUSH_NOTE_CACHE);
+    const r = await c.match(pushNoteKey());
+    if (!r) return;
+    await c.delete(pushNoteKey());
+    const n = await r.json();
+    if (Date.now() - (n.at || 0) < 2 * 60e3) showPushBanner(n);
+  } catch { /* storage blocked */ } finally { checkingPush = false; }
+}
+function showPushBanner(n) {
+  if (!st.booted) return;
+  const el = $('pushbar');
+  const key = ticketParam(n.url);
+  el.innerHTML = `<span class="pb-t"><b>${esc(n.title || 'Relay')}</b>${n.body ? ` <span>${esc(n.body)}</span>` : ''}</span>`
+    + (key ? `<button class="btn primary" id="pb-open">Open</button>` : '')
+    + `<button class="iconbtn" id="pb-x" aria-label="Dismiss">×</button>`;
+  el.hidden = false;
+  const hide = () => { el.hidden = true; el.innerHTML = ''; };
+  $('pb-x').onclick = hide;
+  if (key) $('pb-open').onclick = () => { hide(); openByKey(key); };
+}
+
+// The rail shows the running service worker's VERSION, so a UAT can confirm a
+// device picked up the latest release.
+async function showVersion() {
+  const el = $('sidever');
+  if (!el || !('serviceWorker' in navigator)) return;
+  let v = null;
+  try {
+    // ready never settles when no worker is registered.
+    const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(() => r(null), 3000))]);
+    const sw = navigator.serviceWorker.controller || reg?.active;
+    if (sw) {
+      v = await new Promise((resolve) => {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = (e) => resolve(e.data?.version || null);
+        sw.postMessage({ type: 'relay:version' }, [ch.port2]);
+        setTimeout(() => resolve(null), 2000);
+      });
+    }
+  } catch { /* no worker */ }
+  // A worker from before the version reply: read it from the shell cache's name.
+  if (!v && typeof caches !== 'undefined') {
+    try {
+      const num = (s) => parseInt(s.replace(/\D/g, ''), 10) || 0;
+      v = (await caches.keys()).filter((k) => k.startsWith('relay-shell-')).map((k) => k.slice(12)).sort((a, b) => num(a) - num(b)).pop() || null;
+    } catch { /* storage blocked */ }
+  }
+  el.textContent = v ? `Relay ${v}` : '';
 }
 
 /* ---------- writes ---------- */
@@ -828,11 +888,12 @@ function bindShell() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     checkOpenNote();
+    checkPushNote();
     if (st.booted && !isDemo() && !st.readOnly) refresh();
   });
   addEventListener('focus', () => checkOpenNote());
   addEventListener('pageshow', () => checkOpenNote());
-  setInterval(() => { if (document.visibilityState === 'visible') checkOpenNote(); }, 1500);
+  setInterval(() => { if (document.visibilityState === 'visible') { checkOpenNote(); checkPushNote(); } }, 1500);
   // A notification tapped while Relay is open: the service worker focuses this
   // window and posts the URL.
   navigator.serviceWorker?.addEventListener('message', (e) => {
@@ -840,6 +901,14 @@ function bindShell() {
     if (typeof caches !== 'undefined') caches.open(OPEN_NOTE_CACHE).then((c) => c.delete(new URL('./__open-intent', location.href).href)).catch(() => {});
     openByKey(ticketParam(e.data.url));
   });
+  // A push that arrived while this window is visible (see checkPushNote).
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data?.type !== 'relay:push') return;
+    if (typeof caches !== 'undefined') caches.open(PUSH_NOTE_CACHE).then((c) => c.delete(pushNoteKey())).catch(() => {});
+    showPushBanner(e.data);
+  });
+  // A new worker took over (a release): show its version.
+  navigator.serviceWorker?.addEventListener('controllerchange', () => showVersion());
 }
 
 /* ---------- boot, auth states, sync ---------- */
@@ -997,6 +1066,7 @@ function goOffline(snap) {
   showApp();
   render();
   openPending();
+  checkPushNote();
   refreshPush();
 }
 
@@ -1027,6 +1097,7 @@ async function boot() {
   render();
   scheduleSnapshot();
   openPending();
+  checkPushNote();
   refreshPush();
   startLive();
   adapter.onAuthChange?.((event) => { if (event === 'SIGNED_OUT') location.replace(location.pathname); });
@@ -1051,6 +1122,7 @@ function mountShell() {
 }
 
 mountShell();
+showVersion();
 bindShell();
 bindPullToRefresh();
 boot();

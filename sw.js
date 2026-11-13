@@ -8,7 +8,8 @@
 //   cached. The offline copy of row data lives in localStorage, written by the app.
 // - Push: 'push' shows the notification the relay-push Edge Function sent;
 //   'notificationclick' opens the ticket (see the end of this file).
-const VERSION = 'v8';
+// - 'relay:version' message: replies with VERSION, which the rail shows.
+const VERSION = 'v9';
 const CACHE = `relay-shell-${VERSION}`;
 const FONT_CACHE = 'relay-fonts';
 const FONT_CSS = 'https://fonts.googleapis.com';
@@ -100,12 +101,49 @@ self.addEventListener('push', (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = {}; }
   const title = typeof d.title === 'string' && d.title ? d.title : 'Relay';
-  e.waitUntil(self.registration.showNotification(title, {
-    body: typeof d.body === 'string' ? d.body : 'A ticket is waiting for you.',
-    tag: typeof d.tag === 'string' ? d.tag : undefined,
-    icon: 'icon-192.png',
-    data: { url: typeof d.url === 'string' ? d.url : self.registration.scope },
-  }));
+  const body = typeof d.body === 'string' ? d.body : 'A ticket is waiting for you.';
+  const url = insideScope(d.url);
+  e.waitUntil(Promise.all([
+    self.registration.showNotification(title, {
+      body,
+      tag: typeof d.tag === 'string' ? d.tag : undefined,
+      icon: 'icon-192.png',
+      data: { url },
+    }),
+    tellVisibleWindows({ title, body, url }),
+  ]));
+});
+
+// iOS doesn't deliver 'notificationclick' for a tap while Relay is in front,
+// so when a Relay window is visible the push is also handed to the page, which
+// shows its own banner: by postMessage, and as a Cache Storage note the page
+// polls (the message can be lost on iOS). No visible window: nothing is written,
+// so a page coming to the front later shows no stale banner.
+const PUSH_NOTE_CACHE = 'relay-push-note';
+async function tellVisibleWindows(p) {
+  try {
+    const scope = self.registration.scope;
+    const windows = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+      .filter((c) => c.url.startsWith(scope) && c.visibilityState === 'visible');
+    if (!windows.length) return;
+    const msg = { type: 'relay:push', ...p, at: Date.now() };
+    const c = await caches.open(PUSH_NOTE_CACHE);
+    await c.put(new URL('__push-note', scope).href,
+      new Response(JSON.stringify(msg), { headers: { 'Content-Type': 'application/json' } }));
+    windows.forEach((w) => w.postMessage(msg));
+  } catch { /* the notification is still shown */ }
+}
+
+function insideScope(u) {
+  const scope = self.registration.scope;
+  try {
+    const href = new URL(typeof u === 'string' && u ? u : scope, scope).href;
+    return href.startsWith(scope) ? href : scope;
+  } catch { return scope; }
+}
+
+self.addEventListener('message', (e) => {
+  if (e.data?.type === 'relay:version') e.ports[0]?.postMessage({ version: VERSION });
 });
 
 // A tap opens the ticket: the URL carries ?t=<display key>. An open Relay

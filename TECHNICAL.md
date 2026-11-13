@@ -99,6 +99,7 @@ Pulling down on the List or Board (touch only) shows a strip under the header (`
 - The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
 - Exactly one rail item (the current view: Waiting for me, All tickets, Archived or a project) is marked `aria-current="true"` and filled with `--rail-sel`: a light, near-white pill in both themes. In dark mode its text and count switch to dark ink (`--rail-sel-ink`, `--rail-sel-muted`) so they stay readable on the light fill.
 - The rail lists Waiting for me, All tickets and Archived, then **Jira**, then **Apps**. Both headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
+- **Version.** The rail's last line (`#sidever`) reads "Relay <VERSION>", the running service worker's `VERSION`, asked for with a `{ type: 'relay:version' }` message on a `MessageChannel`. A worker without that reply is read from the newest `relay-shell-*` cache name. It refreshes on `controllerchange`. It waits at most 3 s for `serviceWorker.ready` (which never settles when no worker is registered) and 2 s for the reply; the cache fallback sorts by the number in the name. No version found: the line is hidden.
 
 ## Phone layout (max-width 760px)
 
@@ -122,7 +123,8 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - **Fonts.** IBM Plex comes from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
 - Every other cross-origin request (the Supabase API, Realtime) is never intercepted or cached. The only row data on the device is the app's own snapshot.
 
-- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing.
+- `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. When a Relay window is visible it also hands the push to the page (see "A push while Relay is in front").
+- `message` `{ type: 'relay:version' }` replies on the message's port with `{ version: VERSION }`.
 - `notificationclick` closes the notification, writes `{ url, at }` to Cache Storage (`relay-open-intent`, key `__open-intent`), then focuses an open Relay window and posts `{ type: 'relay:open', url }` to it, or opens a new window at the URL. A URL outside the worker's scope is replaced by the scope.
 
 ## Push notifications
@@ -142,11 +144,22 @@ Three routes, because on iOS a tap can reach the page by any one of them or none
 
 1. **`?t=KEY`** on load. After the board loads, the key (case-insensitive) is matched against `auto_key`, `jira_key`, `display_key` and `aliases`, the ticket panel opens, and `t` is removed from the address (other parameters, such as `demo`, stay). An unknown key shows "KEY isn't on this board."
 2. **`postMessage`** `{ type: 'relay:open', url }` from the worker to an open window.
-3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), and every 1.5 s while the page is visible, then deleted. A note older than 10 minutes is ignored. The interval is what catches a tap on iOS while Relay is already in front: no front-coming event fires then, and the `postMessage` doesn't arrive.
+3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), and every 1.5 s while the page is visible, then deleted. A note older than 10 minutes is ignored.
+
+On the iPhone Home Screen app, a tap on a notification while Relay is already in front reaches none of these: iOS doesn't deliver `notificationclick` to the worker then, so no note is written and no message is sent. The in-app banner covers that case.
 
 If none arrives, the ticket is still in Waiting for me.
 
 All three go through `openByKey()`. When the ticket is found it first closes whatever is in `#modalhost` (the Notifications panel, a form) by clicking its cancel control, so a pending `ask()` resolves as cancelled, and then opens the ticket panel. A modal sits above the ticket panel, so leaving it open would hide the ticket.
+
+### A push while Relay is in front
+
+On `push`, if a window inside the worker's scope has `visibilityState` `visible`, the worker also:
+
+- writes `{ type: 'relay:push', title, body, url, at }` to Cache Storage (`relay-push-note`, key `__push-note`), and
+- posts the same object to each visible window.
+
+The page shows it as a banner at the top (`#pushbar`): the notification's title and body, **Open** (when the URL carries `?t=KEY`) and ×. **Open** hides the banner and goes through `openByKey()`, so it opens the ticket over any open panel. The note is read on start, on `visibilitychange` (visible) and every 1.5 s while the page is visible, then deleted; one older than 2 minutes is ignored. The message deletes the note, so one push shows one banner. With no visible window nothing is written, so a page coming to the front later shows no banner for a push it wasn't showing.
 
 ## Markdown
 
