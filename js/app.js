@@ -233,6 +233,7 @@ function render() {
   $('out').innerHTML = st.view === 'list' ? renderList(rows) : renderBoard(rows);
   $('app').classList.toggle('nav-open', st.sideOpen);
   $('sidescrim').hidden = !st.sideOpen;
+  $('menubtn').setAttribute('aria-expanded', st.sideOpen);
   $('newbtn').disabled = st.readOnly;
   if (st.openId) renderDrawer();
 }
@@ -358,13 +359,23 @@ function stripTicketParam() {
   const q = location.search.slice(1).split('&').filter((p) => p && !/^t(=|$)/.test(p)).join('&');
   history.replaceState(history.state, '', location.pathname + (q ? '?' + q : '') + location.hash);
 }
+// Closes whatever is in #modalhost (the Notifications panel, a form). Its cancel
+// control is clicked so a pending ask() resolves with null.
+function closeModal() {
+  const host = $('modalhost');
+  if (!host.innerHTML) return;
+  host.querySelector('[data-cancel]')?.click();
+  host.innerHTML = '';
+}
 function openByKey(key) {
   if (!key) return;
   if (!st.booted || !D) { pendingKey = key; return; }
   const k = key.trim().toUpperCase();
   const t = D.tickets.find((x) => x.auto_key === k || x.jira_key === k || x.display_key === k || (x.aliases || []).includes(k));
-  if (t) openTicket(t.id);
-  else toast(`${key} isn't on this board.`);
+  if (!t) { toast(`${key} isn't on this board.`); return; }
+  // A modal sits above the ticket panel, so it would hide the ticket.
+  closeModal();
+  openTicket(t.id);
 }
 function openPending() {
   const k = pendingKey;
@@ -744,9 +755,19 @@ function bindShell() {
       try { localStorage.setItem('relay-rail-fold', JSON.stringify(st.railFold)); } catch { /* blocked */ }
       renderNav(); return;
     }
+    // Choosing a view leaves the phone rail open: the highlight moves and the board behind it updates.
     const nv = e.target.closest('[data-nav]');
-    if (nv) { st.nav = nv.dataset.nav; st.sideOpen = false; render(); $('out').scrollTop = 0; window.scrollTo(0, 0); return; }
-    if (e.target.closest('#menubtn')) { st.sideOpen = true; render(); return; }
+    if (nv) {
+      const id = nv.dataset.nav;
+      st.nav = id;
+      render();
+      $('out').scrollTop = 0;
+      window.scrollTo(0, 0);
+      document.querySelector(`#nav [data-nav="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    if (e.target.closest('#menubtn')) { st.sideOpen = !st.sideOpen; render(); return; }
+    if (e.target.closest('#railclose')) { st.sideOpen = false; render(); $('menubtn').focus(); return; }
     if (e.target.closest('#sidescrim')) { st.sideOpen = false; render(); return; }
     const o = e.target.closest('[data-open]');
     if (o) openTicket(o.dataset.open);
@@ -829,8 +850,102 @@ async function refresh() {
     store.load(await adapter.loadAll());
     render();
     scheduleSnapshot();
+    return true;
   } catch (e) {
     console.warn('[relay] refresh failed:', e?.message);
+    return false;
+  }
+}
+
+// Realtime. Each call replaces the channel; status reports from a replaced one are ignored.
+let unsub = null;
+let liveGen = 0;
+function startLive() {
+  const gen = ++liveGen;
+  unsub?.();
+  unsub = adapter.subscribe(
+    (changes) => { store.apply(changes); render(); scheduleSnapshot(); },
+    (status) => {
+      if (gen !== liveGen) return;
+      const was = st.live;
+      st.live = status;
+      if (status === 'live' && was === 'paused') refresh();
+      renderFoot();
+    },
+  );
+}
+
+/* ---------- pull to refresh ---------- */
+
+// Touch only, so desktop mouse drag and drop never sees it. A pull arms only when it starts in
+// the main pane with the page scrolled to the top and no ticket panel, modal or phone rail open.
+// A sideways move first (scrolling the board) or an upward one disarms it.
+const PTR_TRIGGER = 64; // px of indicator height (after resistance) that triggers a refresh
+const PTR_BUSY = 44;
+let ptrBusy = false;
+function bindPullToRefresh() {
+  const el = $('ptr');
+  const label = $('ptrtext');
+  let y0 = null, x0 = 0, pulling = false, dist = 0;
+  const atTop = () => window.scrollY <= 0 && $('out').scrollTop <= 0;
+  const show = (h, state, text) => {
+    el.style.height = h + 'px';
+    el.dataset.state = state;
+    el.style.setProperty('--ptr-turn', Math.round(h * 4) + 'deg');
+    label.textContent = text;
+  };
+  const reset = () => { y0 = null; pulling = false; dist = 0; el.classList.remove('pulling'); };
+  document.addEventListener('touchstart', (e) => {
+    reset();
+    if (ptrBusy || e.touches.length !== 1 || !st.booted || $('app').hidden || st.openId || st.sideOpen || $('modalhost').innerHTML) return;
+    if (!e.target.closest('.pane') || !atTop()) return;
+    y0 = e.touches[0].clientY;
+    x0 = e.touches[0].clientX;
+  }, { passive: true });
+  document.addEventListener('touchmove', (e) => {
+    if (y0 == null) return;
+    const t = e.touches[0];
+    const dy = t.clientY - y0;
+    const dx = t.clientX - x0;
+    if (!pulling) {
+      if (Math.abs(dx) > 8 && Math.abs(dx) >= Math.abs(dy)) { reset(); return; }
+      if (dy < -4 || !atTop()) { reset(); return; }
+      if (dy < 10) return;
+      pulling = true;
+      y0 = t.clientY;
+      el.classList.add('pulling');
+    }
+    const d = t.clientY - y0;
+    dist = Math.min(110, Math.max(0, d) * 0.5);
+    if (d > 0 && e.cancelable) e.preventDefault();
+    show(dist, dist >= PTR_TRIGGER ? 'ready' : 'pull', dist >= PTR_TRIGGER ? 'Release to refresh' : 'Pull to refresh');
+  }, { passive: false });
+  const end = (e) => {
+    if (y0 == null) return;
+    const fire = pulling && dist >= PTR_TRIGGER && e.type === 'touchend';
+    reset();
+    if (fire) pullRefresh();
+    else show(0, '', '');
+  };
+  document.addEventListener('touchend', end, { passive: true });
+  document.addEventListener('touchcancel', end, { passive: true });
+
+  async function pullRefresh() {
+    ptrBusy = true;
+    show(PTR_BUSY, 'busy', 'Refreshing…');
+    const t0 = Date.now();
+    let ok = true;
+    if (isDemo()) render();
+    else if (st.readOnly) await boot(); // the offline strip's Retry
+    else {
+      startLive(); // a stalled Realtime channel is replaced, not only the data reloaded
+      ok = await refresh();
+    }
+    // Long enough to see that something happened.
+    await new Promise((r) => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
+    ptrBusy = false;
+    show(0, '', '');
+    if (!ok) toast("Couldn't reach Relay. Showing what was already loaded.");
   }
 }
 
@@ -880,7 +995,6 @@ function goOffline(snap) {
   refreshPush();
 }
 
-let unsub = null;
 async function boot() {
   let res;
   try {
@@ -909,16 +1023,7 @@ async function boot() {
   scheduleSnapshot();
   openPending();
   refreshPush();
-  unsub?.();
-  unsub = adapter.subscribe(
-    (changes) => { store.apply(changes); render(); scheduleSnapshot(); },
-    (status) => {
-      const was = st.live;
-      st.live = status;
-      if (status === 'live' && was === 'paused') refresh();
-      renderFoot();
-    },
-  );
+  startLive();
   adapter.onAuthChange?.((event) => { if (event === 'SIGNED_OUT') location.replace(location.pathname); });
 }
 
@@ -926,6 +1031,7 @@ async function boot() {
 
 function mountShell() {
   $('menubtn').innerHTML = I_MENU;
+  $('railclose').innerHTML = I_MENU;
   $('searchicon').outerHTML = I_SEARCH;
   document.querySelectorAll('[data-mark]').forEach((el) => (el.innerHTML = handoff(+el.dataset.mark)));
   if (isDemo()) {
@@ -941,6 +1047,7 @@ function mountShell() {
 
 mountShell();
 bindShell();
+bindPullToRefresh();
 boot();
 
 if ('serviceWorker' in navigator) {

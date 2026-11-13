@@ -15,15 +15,15 @@
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <link rel="icon" href="./favicon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" crossorigin href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="./app.css">
 </head>
 <body>
 <div class="app" id="app" hidden>
   <aside class="side" aria-label="Relay navigation">
-    <div class="side-brand"><span data-mark="22" style="display:flex"></span>Relay</div>
+    <div class="side-brand"><span data-mark="22" style="display:flex"></span>Relay<button class="iconbtn" id="railclose" aria-label="Close navigation"></button></div>
     <nav id="nav"></nav>
     <div class="side-notif" id="sidenotif"></div>
     <div class="side-foot" id="sidefoot"></div>
@@ -51,6 +51,7 @@
       </label>
     </div>
     </div>
+    <div class="ptr" id="ptr" aria-hidden="true"><span class="ptr-in"><i class="ptr-i"></i><span class="ptr-t" id="ptrtext"></span></span></div>
     <div class="offbar" id="offbar" hidden></div>
     <div class="waitbar" id="waitbar" hidden></div>
     <div class="scroll" id="out"></div>

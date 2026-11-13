@@ -16,7 +16,7 @@ js/config.js          Supabase URL + publishable key (public), schema, redirect 
 js/push.js            Web Push: state, turn on/off, send test, forget on sign-out
 js/data/index.js      picks the adapter: ?demo → demo, otherwise supabase
 js/data/demo.js       in-memory adapter that mimics the database triggers
-js/data/sample.js     sample data for ?demo
+js/data/sample.js     sample data for ?demo (the real projects, fictional tickets)
 js/data/supabase.js   PostgREST + Realtime adapter for the relay schema
 vendor/               supabase-js 2.116.0 UMD build (exposes window.supabase)
 sw.js                 service worker
@@ -83,14 +83,27 @@ The smoke test is a real `select id from projects limit 1` through the client (`
 
 One channel, `relay-board`, with a `postgres_changes` listener per table (`schema: 'relay'`, `event: '*'`). Each payload is applied to the store and the screen re-renders; an open ticket panel keeps the note being typed, the Jira field, focus and scroll position. When the channel recovers from `CHANNEL_ERROR` / `TIMED_OUT` the app reloads everything once. It also reloads when the page becomes visible again.
 
+`startLive()` opens the channel; each call replaces the previous one, and status reports from a replaced channel are ignored.
+
+## Pull to refresh
+
+Pulling down on the List or Board (touch only) shows a strip under the header (`#ptr`) that opens with the pull: "Pull to refresh", then "Release to refresh" once it is 64px tall (half the finger's travel, capped at 110px). Releasing past that shows "Refreshing…" for at least 450ms while the app replaces the Realtime channel (`startLive()`) and reloads everything (`refresh()`). Offline (read-only) it retries the connection like the offline strip's Retry. On `?demo` it re-renders.
+
+- It arms only when the touch starts in the main pane with the page at the top (`window.scrollY` and `#out.scrollTop` both 0), and with no ticket panel, modal or phone rail open.
+- A sideways move before the pull starts (scrolling the board on a tablet) or an upward one disarms it, so it never takes a horizontal scroll.
+- It listens to touch events only, so desktop mouse drag and drop is never affected.
+- Once pulling, `touchmove` is `preventDefault`ed (a non-passive listener), which stops the browser's own overscroll and its native pull to refresh.
+
 ## View defaults
 
 - The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
+- Exactly one rail item (the current view: Waiting for me, All tickets, Archived or a project) is marked `aria-current="true"` and filled with `--rail-sel`, a translucent white a little lighter than the rail in both themes.
 - The rail lists Waiting for me, All tickets and Archived, then **Jira**, then **Apps**. Both headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
 
 ## Phone layout (max-width 760px)
 
-- The rail becomes a slide-in drawer opened from the menu button. A centred **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible.
+- The rail becomes a slide-in drawer opened from the menu button. Choosing a view in it leaves it open: the highlight moves and the board behind it updates. It closes with the menu button at the top of the drawer (`#railclose`; the toolbar's own is under the drawer), a tap on the scrim, or Escape. **Notifications** closes it, because it opens a panel.
+- A centred **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible.
 - 🚨 **The document scrolls, not an inner panel.** The brand row, toolbar and search form one sticky header (`.phead`, padded by the top safe-area inset). iOS draws its blur under the status bar according to the page's own scroll position, so it only appears once content moves beneath it. With an inner scroller (the desktop layout) the page never scrolls, and iOS showed the blur over the header at rest.
 - The header gains a soft shadow (`.phead.scrolled`) only once the content has scrolled. This uses the window scroll on a phone and `#out` on desktop.
 - The **board stacks its six columns** in one vertical scroll, with no sideways scrolling. An empty column shrinks to its heading. Drag and drop is for desktop; on a phone, status changes from the ticket panel.
@@ -106,7 +119,8 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - Cache name `relay-shell-<VERSION>`; bump `VERSION` when the shell file list changes. Old `relay-shell-*` caches are deleted on activate.
 - Install precaches the shell (HTML, CSS, every module, the vendored client, icons).
 - Same-origin GETs are network-first with `cache: 'no-cache'`, so a new deploy is picked up on the next load; the cache answers only when the network fails. Navigations fall back to the cached `index.html`, which also serves `?demo` offline.
-- Cross-origin requests (the Supabase API, Realtime, Google Fonts) are never intercepted or cached. The only row data on the device is the app's own snapshot.
+- **Fonts.** IBM Plex comes from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
+- Every other cross-origin request (the Supabase API, Realtime) is never intercepted or cached. The only row data on the device is the app's own snapshot.
 
 - `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing.
 - `notificationclick` closes the notification, writes `{ url, at }` to Cache Storage (`relay-open-intent`, key `__open-intent`), then focuses an open Relay window and posts `{ type: 'relay:open', url }` to it, or opens a new window at the URL. A URL outside the worker's scope is replaced by the scope.
@@ -132,7 +146,7 @@ Three routes, because on iOS a tap can reach the page by any one of them or none
 
 If none arrives, the ticket is still in Waiting for me.
 
-A modal open at the time of the tap (such as the Notifications panel) stays open: the ticket panel opens behind it, so the board looks as if the tap only opened the app.
+All three go through `openByKey()`. When the ticket is found it first closes whatever is in `#modalhost` (the Notifications panel, a form) by clicking its cancel control, so a pending `ask()` resolves as cancelled, and then opens the ticket panel. A modal sits above the ticket panel, so leaving it open would hide the ticket.
 
 ## Markdown
 
@@ -157,8 +171,9 @@ Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the ren
 - **One Home Screen icon per app when testing push.** Each icon is its own app, with its own worker, storage and subscription.
 
 - **Enter that opens the panel also closes it.** The panel focuses its close button on open; without `preventDefault()` on the keydown, Chromium delivers the same Enter to that button. Both Enter handlers (search, focused row) prevent the default.
-- **Board columns sized to their text.** `min-width: max-content` on the board grid makes every `minmax(232px, 1fr)` column as wide as its longest unwrapped title (over 500px). The board's min-width is the six 232px minimums plus gaps instead.
+- **Board columns sized to their text.** `min-width: max-content` on the board grid makes every `minmax(150px, 1fr)` column as wide as its longest unwrapped title (over 500px). The board's min-width is the six 150px minimums plus gaps instead, so all six columns fit beside the rail at 1280px; card rows and titles wrap inside a narrow column.
 - **Duplicate element IDs in dialogs.** A modal field with id `m-title` collided with the modal heading; the heading is `m-heading`.
 - **`crypto.randomUUID` needs a secure context.** It is missing on LAN http, so `uuid()` in `js/model.js` falls back to `getRandomValues`.
 - **Stale modules.** Serve locally with `Cache-Control: no-store`; the service worker itself fetches with `cache: 'no-cache'`.
-- **Headless drag and drop.** Playwright's one-shot `dragTo` can start the drag on the wrong card; driving the mouse in steps works. Columns off-screen at 1280px need a wider viewport in tests.
+- **Headless drag and drop.** Playwright's one-shot `dragTo` can start the drag on the wrong card; driving the mouse in steps works.
+- **Simulating pull to refresh.** Playwright's `touchscreen` only taps. Send `Input.dispatchTouchEvent` (touchStart, several touchMove, touchEnd) through a CDP session, in a context with `hasTouch`.
