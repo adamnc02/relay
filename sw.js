@@ -9,7 +9,7 @@
 // - Push: 'push' shows the notification the relay-push Edge Function sent;
 //   'notificationclick' opens the ticket (see the end of this file).
 // - 'relay:version' message: replies with VERSION, which the rail shows.
-const VERSION = 'v11';
+const VERSION = 'v13';
 const CACHE = `relay-shell-${VERSION}`;
 const FONT_CACHE = 'relay-fonts';
 const FONT_CSS = 'https://fonts.googleapis.com';
@@ -36,6 +36,7 @@ const SHELL = [
   './favicon-32.png',
   './icon-192.png',
   './icon-512.png',
+  './icon-512-maskable.png',
   './apple-touch-icon.png',
 ];
 
