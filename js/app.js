@@ -386,10 +386,14 @@ function openPending() {
 }
 // The service worker also writes a tapped notification's URL to Cache Storage,
 // because on iOS a tap can reach the page without the URL or the message. Read
-// on start and whenever the page comes to the front, then deleted.
+// on start, whenever the page comes to the front, and every 1.5 s while it is
+// visible (a tap on iOS while Relay is already in front fires none of the
+// front-coming events, and the worker's message can be lost), then deleted.
 const OPEN_NOTE_CACHE = 'relay-open-intent';
+let checkingNote = false;
 async function checkOpenNote() {
-  if (!st.booted || typeof caches === 'undefined') return;
+  if (!st.booted || typeof caches === 'undefined' || checkingNote) return;
+  checkingNote = true;
   try {
     const c = await caches.open(OPEN_NOTE_CACHE);
     const key = new URL('./__open-intent', location.href).href;
@@ -398,7 +402,7 @@ async function checkOpenNote() {
     await c.delete(key);
     const n = await r.json();
     if (Date.now() - (n.at || 0) < 10 * 60e3) openByKey(ticketParam(n.url));
-  } catch { /* storage blocked */ }
+  } catch { /* storage blocked */ } finally { checkingNote = false; }
 }
 
 /* ---------- writes ---------- */
@@ -828,6 +832,7 @@ function bindShell() {
   });
   addEventListener('focus', () => checkOpenNote());
   addEventListener('pageshow', () => checkOpenNote());
+  setInterval(() => { if (document.visibilityState === 'visible') checkOpenNote(); }, 1500);
   // A notification tapped while Relay is open: the service worker focuses this
   // window and posts the URL.
   navigator.serviceWorker?.addEventListener('message', (e) => {

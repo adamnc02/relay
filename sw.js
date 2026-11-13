@@ -8,7 +8,7 @@
 //   cached. The offline copy of row data lives in localStorage, written by the app.
 // - Push: 'push' shows the notification the relay-push Edge Function sent;
 //   'notificationclick' opens the ticket (see the end of this file).
-const VERSION = 'v7';
+const VERSION = 'v8';
 const CACHE = `relay-shell-${VERSION}`;
 const FONT_CACHE = 'relay-fonts';
 const FONT_CSS = 'https://fonts.googleapis.com';
