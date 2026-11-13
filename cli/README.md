@@ -42,6 +42,10 @@ cli/install.sh --dry-run  # print the merged settings.json and CLAUDE.md; change
 Every path is resolved from `$HOME` at install time, so the same kit installs on any Mac. Running it
 twice leaves `settings.json` and `CLAUDE.md` byte-identical.
 
+The kit runs on macOS (and other POSIX systems) only. It does not run on native Windows: it uses
+`fcntl` file locks, a `SIGALRM` hook time box, a `/bin/sh` installer and a shebang-run script, and
+`relay doctor` reads macOS managed-settings paths.
+
 ## Install on another Mac
 
 1. **psql.** `command -v psql`. If it's missing: `brew install libpq && brew link --force libpq`.
@@ -173,7 +177,7 @@ Installed into `~/.claude/settings.json` as shell-form commands
 | PostToolUse | `Write\|Edit\|NotebookEdit` | `hook file` | 1.5 s (5 s) | none | Appends one job to the queue (path, `write` for Write, `edit` for Edit/NotebookEdit, session, time) and the path to the session's `.paths` file. Skips files under the session's scratchpad |
 | PostToolUse | `*` | `hook post-tool` | 4 s (10 s) | ≤ 2 queries, at most every 30 s | If the session has a ticket: unseen notes as `additionalContext` (shown to Claude next to the tool result), then snapshots any new repo the session edited and flushes the queue |
 | UserPromptSubmit | — | `hook prompt` | 6 s (10 s) | ≤ 3 queries | Unseen notes as `additionalContext`. A prompt starting `Continue KEY` also attaches KEY and injects its `get` output (marking its notes seen) |
-| SessionEnd | all | `hook session-end` | 1 s (10 s) | none | If the session has a ticket and wasn't closed with `relay close`: queues a session-end job holding the last assistant message from the transcript. Starts the background worker to sweep and flush |
+| SessionEnd | all | `hook session-end` | 1 s (10 s) | none | If the session has a ticket and wasn't closed with `relay close` since it last attached one: queues a session-end job holding the last assistant message from the transcript. Starts the background worker to sweep and flush |
 
 The background worker (`hook bg`) runs fully detached (`start_new_session`), with a 60 s time box,
 so it outlives the hook and the session, including `claude -p`.
@@ -211,7 +215,7 @@ characters (Claude Code's limit is 10,000).
 | `bin/relay` | The installed CLI |
 | `bin/hooks.json` | The installed hook list (`relay doctor` checks settings.json against it) |
 | `paths.json` | Optional: this machine's folder prefix → project key overrides |
-| `sessions/<id>.json` | Session → tickets (the last is current), cwd, `closed`, `ended`, and the git snapshot per repo |
+| `sessions/<id>.json` | Session → tickets (the last is current), cwd, `closed` (set by `relay close`, cleared by `attach` and `create`), `ended`, and the git snapshot per repo |
 | `sessions/<id>.paths` | Paths the session changed with Write/Edit/NotebookEdit (the sweep skips them) |
 | `sessions/<id>.check` | mtime = the last note check (set in the future while backing off) |
 | `sessions/<id>.lock` | flock for read-modify-write of the state file |
