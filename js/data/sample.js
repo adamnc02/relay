@@ -1,6 +1,6 @@
-// Sample data for ?demo, ported from the approved mockup. Shaped exactly like
-// rows from the relay schema so the UI cannot tell the two adapters apart.
-// Every project and ticket here is fictional sample content.
+// Sample data for ?demo. Shaped exactly like rows from the relay schema so the
+// UI cannot tell the two adapters apart. The projects are the board's real
+// projects; every ticket here is fictional sample content.
 
 import { uuid } from '../model.js';
 
@@ -9,13 +9,17 @@ const GH = '/Users/adamcox/Documents/GitHub';
 const MEM = '/Users/adamcox/.claude/projects/-Users-adamcox-Downloads-App-Development---Bug-Tracking/memory';
 
 const PROJECTS = [
-  ['BLC', 'BLOC', '#D2453B'],
-  ['LDG', 'Ledgers', '#3F8A3A'],
   ['RLY', 'Relay', '#2A5BD7'],
+  ['BLC', 'BLOC', '#D2453B'],
+  ['SFL', 'Shared ledger', '#3F8A3A'],
+  ['PLG', 'Personal ledger', '#5B7F2A'],
+  ['PF', 'personal-f', '#0E7490'],
   ['LST', 'Listly', '#A16207'],
   ['PCH', 'Pinch', '#C2410C'],
   ['DSK', 'DataSketch', '#7C3AED'],
   ['MDC', 'My Dream Clean', '#0F7A72'],
+  ['SUP', 'Supabase', '#475569'],
+  ['INB', 'Inbox', '#7A8794'],
 ];
 
 // [auto_key, status, title, hoursAgo, extra]
@@ -27,7 +31,7 @@ const TICKETS = [
   ['RLY-5', 'backlog', 'Phase 3: skills, hooks and the handoff import', 0.2, { parent: 'RLY-1', phase: 3 }],
   ['RLY-6', 'backlog', 'Phase 4: push when something needs you', 0.2, { parent: 'RLY-1', phase: 4 }],
   ['LST-7', 'waiting', 'Shared list invite fails on second device', 1.2, { need: 'Run UAT on phone: open invite link signed in as the second account, confirm the list appears.', next: 'Merge PR #41 once UAT passes.', links: { branch: 'fix/invite-second-device', pr: '#41' } }],
-  ['LDG-14', 'waiting', 'Recurring transfers double-post on month end', 5, { need: "Run the cleanup block in SQL editor (claude_ro can't drop its own UAT policy), then say done.", next: 'Verify 0 rows, then open live PR.', links: { branch: 'fix/month-end-recurring', pr: '#88 (test)' } }],
+  ['SFL-14', 'waiting', 'Recurring transfers double-post on month end', 5, { need: "Run the cleanup block in SQL editor (claude_ro can't drop its own UAT policy), then say done.", next: 'Verify 0 rows, then open live PR.', links: { branch: 'fix/month-end-recurring', pr: '#88 (test)' } }],
   ['PCH-9', 'progress', 'Seed demo data for meal-plan export', 0.3, { next: 'Add three demo recipes with export enabled; UAT on ?demo.', links: { branch: 'feat/mealplan-export' } }],
   ['DSK-21', 'progress', 'BYOR: map column picker to SOW fields', 2, { wrapup: true, next: 'Finish field mapping for rate and duration.', links: { branch: 'main' } }],
   ['BLC-50', 'backlog', 'Coach cycle rework (PROMPT-03)', 20, {}],
@@ -39,8 +43,11 @@ const TICKETS = [
   ['LST-8', 'next', 'Offline add-item queue', 72, { next: 'Design the queue; start in finance-style test copy.' }],
   ['BLC-53', 'backlog', 'Retire 2025-09-26/bloc-brand folder', 120, { next: 'Move items to BACKLOG.md first.' }],
   ['DSK-19', 'backlog', 'Native chart export to PNG', 200, {}],
-  ['LDG-12', 'done', 'Category totals ignore split transactions', 96, { links: { pr: '#80' } }],
+  ['PLG-12', 'done', 'Category totals ignore split transactions', 96, { links: { pr: '#80' } }],
   ['PCH-7', 'done', 'Recipe import drops fractions', 48, { archived: true, links: { pr: '#31' } }],
+  ['SUP-2', 'next', 'Check the push cron after the next migration', 30, { next: 'Run the cron verify file as claude_ro.' }],
+  ['PF-5', 'backlog', 'Export the year summary as CSV', 150, {}],
+  ['INB-1', 'backlog', 'Sort the loose notes in the tracking folder', 8, {}],
   ['MDC-3', 'done', 'Booking form zooms on focus in iOS Safari', 18 * 24, { links: { pr: '#9' } }],
 ];
 
