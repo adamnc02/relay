@@ -566,6 +566,50 @@ async function didThis(t) {
   }, 'Sent. A running session picks it up at its next step.');
 }
 
+// Tickets land in the Inbox unless a project is named; from there Adam files
+// them into a project or links them to Jira.
+const INBOX = 'INB';
+const APP_COLOURS = ['#0EA5E9', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#6366F1', '#84CC16'];
+async function newProject() {
+  const v = await ask({
+    title: 'New project', ok: 'Create',
+    fields: [
+      { id: 'name', label: 'Name', placeholder: 'Stock Report', required: true },
+      { id: 'key', label: 'Key (2 to 10 capitals or digits, starting with a letter)', placeholder: 'Leave blank to make one from the name' },
+    ],
+  });
+  if (!v) return null;
+  const words = v.name.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').trim().split(/\s+/).filter(Boolean);
+  const auto = words.length > 1 ? words.map((w) => w[0]).join('').slice(0, 4) : (words[0] || '').slice(0, 3);
+  const key = (v.key || auto).toUpperCase();
+  if (!PROJECT_KEY_RE.test(key)) { toast(`${key || 'That'} can't be a project key: use 2 to 10 capitals or digits, starting with a letter.`); return null; }
+  if (store.rows('projects').some((o) => o.key === key)) { toast(`Project ${key} already exists. Pick it from the list, or choose another key.`); return null; }
+  const used = new Set(store.rows('projects').map((o) => String(o.colour).toUpperCase()));
+  const colour = APP_COLOURS.find((c) => !used.has(c)) || APP_COLOURS[store.rows('projects').length % APP_COLOURS.length];
+  const ch = await run(() => adapter.insertProject({ key, name: v.name, colour, kind: 'app' }), 'Created project ' + key);
+  return ch ? ch.find((c) => c.table === 'projects' && c.type === 'INSERT').row : null;
+}
+async function moveProject(t, pid) {
+  if (pid === '__new') {
+    const p = await newProject();
+    if (!p) { render(); return; }
+    pid = p.id;
+  }
+  const to = store.rows('projects').find((o) => o.id === pid);
+  if (!to || pid === t.project_id) { render(); return; }
+  if (t.jira_key && to.kind !== 'jira') { toast(`${disp(t)} is linked to Jira, so it can only go into a Jira project. Remove the link first.`); render(); return; }
+  const from = proj(t);
+  const old = disp(t);
+  await run(async () => {
+    const ch = await adapter.updateTicket(t.id, { project_id: pid });
+    const row = ch.find((c) => c.table === 'tickets' && c.row.id === t.id)?.row;
+    const now = row ? row.display_key || row.auto_key : to.key;
+    const all = ch.concat(await note(t, 'id', `Moved from ${from.key} to ${to.key}${isParent(t) ? ' with its phases' : ''}. ${old} is now ${now}.`));
+    all.moved = now;
+    return all;
+  }, (c) => `Moved to ${to.key}: now ${c.moved}`);
+}
+
 function jiraBaseFor(p) {
   if (p?.jira_base) return p.jira_base;
   try { return localStorage.getItem('relay:jira-base'); } catch { return null; }
@@ -721,10 +765,12 @@ function renderDrawer(fresh = false) {
    <div class="dhead"><div style="min-width:0;flex:1"><div class="bigid">${x.jira_key ? (jiraHref ? `<a href="${esc(jiraHref)}" target="_blank" rel="noopener noreferrer">${esc(x.jira_key)} ↗</a>` : esc(x.jira_key)) : esc(x.auto_key)}</div><h2 id="dtitle" class="dtitle" ${st.readOnly ? '' : 'tabindex="0" title="Rename"'}>${esc(x.title)}</h2><div class="dmeta">${projTag(x)}${par ? `<button class="partof" data-goto="${par.id}">Part of ${esc(disp(par))} · ${esc(par.title)}</button>` : ''}${x.needs_wrapup ? '<span class="flag">Closed without wrap-up</span>' : ''}</div></div><button class="x" data-close aria-label="Close">×</button></div>
    <div class="dbody">
     ${isP ? `<div class="field"><span class="lbl">Status</span><div>${pill(x.status)} <span class="hint">Set by its phases</span></div></div>` : `<div class="field"><label class="lbl" for="d-status">Status</label><select id="d-status" ${ro}>${STATUSES.map((s) => `<option value="${s.id}" ${s.id === x.status ? 'selected' : ''}>${s.name}</option>`).join('')}</select></div>`}
+    ${x.parent_id ? `<div class="field"><span class="lbl">Project</span><div>${projTag(x)} <span class="hint">A phase moves with its parent</span></div></div>`
+      : `<div class="field"><label class="lbl" for="d-proj">Project</label><select id="d-proj" ${ro}>${D.projects.filter((o) => !o.archived || o.id === x.project_id).map((o) => `<option value="${o.id}" ${o.id === x.project_id ? 'selected' : ''}>${esc(o.key)} · ${esc(o.name)}${o.kind === 'jira' ? ' (Jira)' : ''}</option>`).join('')}<option value="__new">+ New project…</option></select><p class="hint">Moving gives the ticket a new ID in that project${isP ? ', and its phases move with it' : ''}. The old ID still finds it.</p></div>`}
     ${!isP ? `<div class="field"><label class="lbl" for="d-parent">Parent</label><select id="d-parent" ${ro}><option value="">None</option>${parents.map((o) => `<option value="${o.id}" ${x.parent_id === o.id ? 'selected' : ''}>${esc(disp(o))} · ${esc(o.title)}</option>`).join('')}</select><p class="hint">Put this ticket under a parent as one of its phases. Parents come from the same project.</p></div>` : ''}
     <div><button class="btn" id="d-arch" ${ro}>${x.archived_at ? 'Unarchive' : 'Archive'}</button></div>
     ${x.status === 'waiting' ? `<div class="waitbox field"><span class="lbl">What I need from you</span><div>${esc(x.need)}</div>${wk ? `<div><button class="btn" data-goto="${wk.id}">Open ${esc(disp(wk))}</button></div>` : `<div class="btnrow"><button class="btn" id="d-did" ${ro}>I've done this</button><button class="xbtn" id="d-need" ${ro}>Change</button></div>`}</div>` : ''}
-    ${p.kind === 'jira' ? `<div class="field"><span class="lbl">IDs</span><div class="idbox">
+    ${p.kind === 'jira' || p.key === INBOX ? `<div class="field"><span class="lbl">IDs</span>${p.key === INBOX ? '<p class="hint">Linking a Jira issue moves this ticket into that Jira project, and the Jira ID becomes its display ID.</p>' : ''}<div class="idbox">
       <span class="k">Relay ID</span><span class="mono">${esc(x.auto_key)}</span>
       <span class="k">Jira</span><div class="idrow"><input id="d-jira" placeholder="Paste Jira link or key" value="${esc(x.jira_url || x.jira_key || '')}" aria-label="Jira link or key" ${ro}><button class="btn" id="d-link" ${ro}>${x.jira_key ? 'Update' : 'Link'}</button></div>
       <span class="k">Shown as</span><span class="mono" style="font-weight:600">${esc(disp(x))}</span>
@@ -749,6 +795,7 @@ function renderDrawer(fresh = false) {
   on('d-addphase', 'onclick', () => addPhase(x));
   on('d-status', 'onchange', (e) => setStatus(x, e.target.value));
   on('d-parent', 'onchange', (e) => setParent(x, e.target.value || null));
+  on('d-proj', 'onchange', (e) => moveProject(x, e.target.value));
   on('d-arch', 'onclick', () => toggleArchive(x));
   on('d-link', 'onclick', () => linkJira(x, $('d-jira').value.trim()));
   on('d-jira', 'onkeydown', (e) => { if (e.key === 'Enter') linkJira(x, e.target.value.trim()); });

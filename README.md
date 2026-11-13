@@ -26,9 +26,10 @@ Relay is a single-user projects board: a grouped list and a kanban board of tick
 
 **The ticket panel** opens from any card or row:
 - ID (a Jira ticket's key links to Jira), title (tap to rename), project, and the parent if it's a phase.
+- **Project**: move the ticket into another project, or **+ New project…** to make one. New tickets land in the Inbox until you file them. A phase moves only with its parent.
 - **Status**, which a parent doesn't have: it shows "Set by its phases". **Parent**: put the ticket under a parent from the same project as one of its phases. **Archive** / **Unarchive**.
 - In Waiting for me: **What I need from you**, with **I've done this** (moves the ticket to In progress and logs a note) and **Change**. A waiting parent links to the phase that is waiting.
-- Jira projects only: the Relay ID, the Jira link or key, and the ID it's shown as.
+- Jira projects and the Inbox: the Relay ID, the Jira link or key, and the ID it's shown as. Linking a Jira issue to an Inbox ticket moves it into that Jira project.
 - **Pick up in a new session**: the kickoff line (`Continue KEY.`) with **Copy**.
 - A parent's **Phases**, with progress and **+ Add phase**.
 - **Brief** (a parent's is the **Plan**), rendered markdown. **Next step**, when the brief doesn't already contain it.

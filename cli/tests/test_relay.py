@@ -569,5 +569,38 @@ class Windows(unittest.TestCase):
         self.assertIsNone(relay.repo_root(d))
 
 
+class CreateGoesToInbox(TempHome):
+    """A new ticket lands in the Inbox unless --project names one, even from a mapped folder."""
+
+    def run_create(self, project=None, cwd="/Users/a/GitHub/relay"):
+        calls = []
+        projects = [{"id": "p-rly", "key": "RLY", "name": "Relay", "paths": ["/Users/a/GitHub/relay"]},
+                    {"id": "p-inb", "key": "INB", "name": "Inbox", "paths": []}]
+
+        def fake_q(sql, v=None):
+            if sql == relay.SQL_PROJECTS:
+                return projects
+            calls.append(v)
+            return {"id": "t1", "key": "X-1"}
+        saved = (relay.q, relay.norm, relay.common_vars, relay.actor)
+        relay.q = fake_q
+        relay.norm = lambda p: cwd if p == os.getcwd() else p
+        relay.common_vars = lambda sid=None, cwd=None: {}
+        relay.actor = lambda sid: "claude:test"
+        try:
+            args = type("A", (), dict(session=None, status=None, need=None, parent=None, project=project,
+                                      no_attach=True, brief=None, title="T", next_step=None, phase=None))()
+            relay.cmd_create(args)
+        finally:
+            relay.q, relay.norm, relay.common_vars, relay.actor = saved
+        return calls[-1]["project_id"]
+
+    def test_mapped_folder_still_goes_to_inbox(self):
+        self.assertEqual(self.run_create(), "p-inb")
+
+    def test_named_project_wins(self):
+        self.assertEqual(self.run_create(project="rly"), "p-rly")
+
+
 if __name__ == "__main__":
     unittest.main()
