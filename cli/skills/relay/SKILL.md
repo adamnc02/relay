@@ -37,10 +37,11 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
    EOF
    ```
 
-   `create` attaches the new ticket to this session, puts it **In progress**, and picks the project
-   from the working folder (the folder or repo, worktrees included). For work on a named app from
-   somewhere else (for example the tracking folder), pass `--project KEY`. Unmatched work goes to
-   the Inbox (`INB`) for Adam to re-file. Create a new project only when Adam asks.
+   `create` attaches the new ticket to this session and puts it **In progress**. **Every new
+   ticket goes to the Inbox (`INB`)** unless Adam names its project in the chat (an app-session
+   where he picked the app counts); only then pass `--project KEY`. The working folder never picks
+   the project. Adam files Inbox tickets himself in the app: into an existing project, a new
+   project, or a Jira project by linking the Jira issue. Create a new project only when Adam asks.
 4. **Phased work** is a parent with one child per phase: `relay create "Phase 2: …" --parent RLY-1`
    (the phase number defaults to the next one). A phase can't have phases, and it lives in its
    parent's project. **Never set a parent's status**: the database rolls it up from its phases.

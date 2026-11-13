@@ -78,8 +78,9 @@ The kit runs on native Windows with `python cli/install.py` (Python 3.8+). What 
    the skills and the CLAUDE.md block, and exits 1 if any fails. **`FAIL network`** usually means the network blocks outbound
    port 5432, which corporate networks often do. Try another network, such as a phone hotspot.
    Until it passes, every hook stays silent and sessions carry on normally.
-5. **Folders.** `projects.paths` holds this Mac's folders, so on another machine sessions land in
-   Inbox unless the folder matches. Map the local folders in `~/.claude/relay/paths.json`:
+5. **Folders.** The working folder decides which project's tickets a session sees at start (new
+   tickets always go to the Inbox unless the project is named in the chat). `projects.paths` holds
+   this Mac's folders, so on another machine map the local folders in `~/.claude/relay/paths.json`:
 
    ```json
    {
@@ -182,7 +183,7 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `context [--cwd DIR]` | The text the SessionStart hook injects (below) |
 | `find TEXT… [--all] [--project KEY]` | IDs, aliases and Jira keys exactly; title and brief by substring. Board tickets only unless `--all` |
 | `get KEY [--all] [--peek]` | Brief; the last 3 sessions (`--all`: every one); files grouped by repo or folder; docs; links; recent activity. A parent shows its plan and every phase's status, and a phase shows its parent's plan and its siblings. Inside a session it marks Adam's unseen notes on the ticket (and its parent) as seen and prints them first, unless `--peek` |
-| `create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--no-attach]` | Inserts a ticket (status `progress` by default). The project is `--project`, else the parent's, else the working folder's, else `INB`. `--parent` without `--phase` takes the parent's next phase number. Attaches it to the session unless `--no-attach` |
+| `create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--no-attach]` | Inserts a ticket (status `progress` by default). The project is `--project` (passed only when Adam names it in the chat), else the parent's, else `INB`. The working folder doesn't pick it. `--parent` without `--phase` takes the parent's next phase number. Attaches it to the session unless `--no-attach` |
 | `attach KEY` | Records session → ticket locally, appends the session ID to `tickets.session_ids`, inserts the `sessions` row, clears `needs_wrapup`, snapshots the ticket's project repos, and flushes the queue |
 | `brief [--key K] [--next-step S]` | Replaces the brief with stdin |
 | `session [--key K] --summary S [--open-items O] [--commit SHA]… [--pr URL]…` | Upserts this session's row: the summary is appended, open items replaced, commits and PRs merged |
@@ -229,7 +230,7 @@ never changes the status.
 `~/.claude/relay/paths.json`, else the longest `projects.paths` prefix on whole path components; a linked git worktree also matches through its
 main checkout's folder; else Inbox), then any **closed-without-wrap-up** tickets for that project
 or last worked from that folder, then the project's open tickets (parents with their phases), then
-everything **Waiting for me** in other projects, then the ticket rule. It is cut to 9,500
+everything **Waiting for me** in other projects, then where a new ticket goes (the Inbox, unless Adam names the project in the chat), then the ticket rule. It is cut to 9,500
 characters (Claude Code's limit is 10,000).
 
 ### Failure behaviour

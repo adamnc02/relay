@@ -169,9 +169,13 @@ The banner (`#pushbar`) shows the notification's title and body, **Open** (when 
 
 Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the renderer then produces only headings, paragraphs, bullet and numbered lists, fenced code, inline code, bold, italic and links. Links are kept only for `http:`, `https:` and `mailto:`, and open in a new tab with `rel="noopener noreferrer"`. Link URLs in `links` jsonb follow the same rule.
 
+## Filing a ticket
+
+New tickets land in the Inbox (`INB`) unless the project is named when they're made. The ticket panel's **Project** picker moves a ticket into any project, or into a new one (**+ New project…**). A new project is `kind 'app'`; its key is the one typed, or one made from the name (the initials of several words, or the first three letters of one), and must match `^[A-Z][A-Z0-9]{1,9}$` and be unused. Its colour is the first of `APP_COLOURS` not already used by a project. A move re-keys the ticket in the new project, keeps the old ID in `aliases`, takes a parent's phases with it, and logs an `id` event. A phase shows its project as text: it moves only with its parent. A Jira-linked ticket can't move into an app project until the link is removed.
+
 ## Jira
 
-- Jira fields exist only on tickets in projects with `kind = 'jira'`; app tickets never show them.
+- The Jira box shows on tickets in Jira projects and in the Inbox (`INB`); app tickets never show it. Linking a Jira issue to an Inbox ticket moves it into that Jira project.
 - A pasted URL's key is found in `?selectedIssue=KEY-1`, `/browse/KEY-1` or anywhere in the URL. A bare key gets its link from the project's `jira_base` or the last pasted Jira origin (`localStorage` `relay:jira-base`).
 - Pasting a Jira issue URL into search and pressing Enter opens the ticket with that key, or creates one in that Jira project, creating the project (`kind 'jira'`, colour `#64748B`, `jira_base` from the URL) if it doesn't exist. A key whose prefix is an app project is refused.
 - A Relay project key must match `^[A-Z][A-Z0-9]{1,9}$`, but a Jira prefix may contain `_` or be longer. `jiraProjectKey()` maps it (drop non-alphanumerics, cut to 10), so `DATA_PLATFORM_X-7` lands in project `DATAPLATFO`, named `DATA_PLATFORM_X`. The ticket's `jira_key` keeps the `_`.
