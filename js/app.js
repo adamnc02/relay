@@ -388,7 +388,8 @@ function openPending() {
 // because on iOS a tap can reach the page without the URL or the message. Read
 // on start, whenever the page comes to the front, and every 1.5 s while it is
 // visible, then deleted. (A tap on iOS while Relay is already in front reaches
-// the worker not at all; the push banner below covers that case.)
+// the worker not at all. The push banner below was built for that case but
+// doesn't show on the iPhone; see TECHNICAL.md.)
 const OPEN_NOTE_CACHE = 'relay-open-intent';
 let checkingNote = false;
 async function checkOpenNote() {
@@ -411,6 +412,8 @@ async function checkOpenNote() {
 // for a push that arrived while it was in front: one stamped after the page
 // last came to the front (a few seconds' grace, in case iOS briefly hides the
 // page as the notification drops down). Anything older is dropped.
+// On the iPhone Home Screen app the banner doesn't show (UAT 2026-11-13; cause
+// not found).
 const PUSH_NOTE_CACHE = 'relay-push-note';
 const pushNoteKey = () => new URL('./__push-note', location.href).href;
 let frontSince = document.visibilityState === 'visible' ? Date.now() : Infinity;
