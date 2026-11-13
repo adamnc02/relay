@@ -371,7 +371,9 @@ function openByKey(key) {
   if (!key) return;
   if (!st.booted || !D) { pendingKey = key; return; }
   const k = key.trim().toUpperCase();
-  const t = D.tickets.find((x) => x.auto_key === k || x.jira_key === k || x.display_key === k || (x.aliases || []).includes(k));
+  // A ticket's own IDs first: a Jira key may be shared by several tickets.
+  const t = D.tickets.find((x) => x.auto_key === k || (x.aliases || []).includes(k)) ||
+    D.tickets.find((x) => x.jira_key === k || x.display_key === k);
   if (!t) { toast(`${key} isn't on this board.`); return; }
   // A modal sits above the ticket panel, so it would hide the ticket.
   closeModal();
@@ -640,7 +642,8 @@ async function linkJira(t, raw) {
   }
   const j = parseJira(raw, jiraBaseFor(proj(t)));
   if (!j || !JIRA_KEY_RE.test(j.key)) { toast('No Jira key found. Paste the issue URL or a key like WEB-500.'); return; }
-  if (D.tickets.some((o) => o.id !== t.id && (o.jira_key === j.key || o.auto_key === j.key || (o.aliases || []).includes(j.key)))) { toast(j.key + ' is already used by another ticket'); return; }
+  // Several tickets may link the same Jira issue; the key just can't be another ticket's own ID.
+  if (D.tickets.some((o) => o.id !== t.id && (o.auto_key === j.key || (o.aliases || []).includes(j.key)))) { toast(j.key + ' is already used by another ticket'); return; }
   rememberJiraBase(j.base);
   const prefix = j.key.split('-')[0];
   await run(async () => {
@@ -904,8 +907,13 @@ function bindShell() {
     if (!raw) return;
     const q = raw.toUpperCase();
     const j = /^https?:\/\//i.test(raw) ? parseJira(raw) : null;
-    const hit = D.tickets.find((t) => t.auto_key === q || t.jira_key === q || (t.aliases || []).includes(q) || (j && t.jira_key === j.key));
-    if (hit) { openTicket(hit.id); return; }
+    const own = D.tickets.find((t) => t.auto_key === q || (t.aliases || []).includes(q));
+    if (own) { openTicket(own.id); return; }
+    // A Jira issue can be linked to several tickets: open the one, or leave the filtered list showing them all.
+    const jk = j ? j.key : q;
+    const linked = D.tickets.filter((t) => t.jira_key === jk);
+    if (linked.length === 1) { openTicket(linked[0].id); return; }
+    if (linked.length > 1) return;
     if (j && JIRA_KEY_RE.test(j.key)) createFromJira(j);
   });
   const setView = (v) => { st.view = v; try { localStorage.setItem('relay-view-2', v); } catch { /* blocked */ } render(); };

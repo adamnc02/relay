@@ -180,6 +180,7 @@ A session files a new ticket in its project when it knows it; one with no fittin
 - Pasting a Jira issue URL into search and pressing Enter opens the ticket with that key, or creates one in that Jira project, creating the project (`kind 'jira'`, colour `#64748B`, `jira_base` from the URL) if it doesn't exist. A key whose prefix is an app project is refused.
 - A Relay project key must match `^[A-Z][A-Z0-9]{1,9}$`, but a Jira prefix may contain `_` or be longer. `jiraProjectKey()` maps it (drop non-alphanumerics, cut to 10), so `DATA_PLATFORM_X-7` lands in project `DATAPLATFO`, named `DATA_PLATFORM_X`. The ticket's `jira_key` keeps the `_`.
 - Linking a key from another Jira project moves the ticket there (and its phases with it). A phase can't move on its own.
+- Several tickets may link to one Jira issue (silver-octo-invention migration `20261113160000_relay_shared_jira_delete.sql`); a Jira key still can't be another ticket's `auto_key` or alias. They share a display ID, so the list shows each one's auto key beside it. Search, Enter on that key opens the ticket when only one links it and otherwise leaves the filtered list showing them all; `?t=KEY` prefers a ticket's own ID, then the first linked one.
 
 ## Icons
 
