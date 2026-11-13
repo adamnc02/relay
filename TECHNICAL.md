@@ -97,7 +97,7 @@ Pulling down on the List or Board (touch only) shows a strip under the header (`
 ## View defaults
 
 - The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
-- Exactly one rail item (the current view: Waiting for me, All tickets, Archived or a project) is marked `aria-current="true"` and filled with `--rail-sel`, a translucent white a little lighter than the rail in both themes.
+- Exactly one rail item (the current view: Waiting for me, All tickets, Archived or a project) is marked `aria-current="true"` and filled with `--rail-sel`: a light, near-white pill in both themes. In dark mode its text and count switch to dark ink (`--rail-sel-ink`, `--rail-sel-muted`) so they stay readable on the light fill.
 - The rail lists Waiting for me, All tickets and Archived, then **Jira**, then **Apps**. Both headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
 
 ## Phone layout (max-width 760px)

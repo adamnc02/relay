@@ -5,7 +5,7 @@
   --wait:#b85c00; --wait-bg:#fff1e0; --wait-line:#f0c48f;
   --s-backlog:#7a8794; --s-next:#6b4fc8; --s-prog:#2a5bd7; --s-uat:#0f7a72; --s-done:#3f8a3a;
   --err:#c0392b;
-  --rail-sel:rgba(255,255,255,.78);
+  --rail-sel:rgba(255,255,255,.78); --rail-sel-ink:var(--fg); --rail-sel-muted:var(--muted);
   --font-ui:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
   --font-id:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
   --r:6px;
@@ -17,7 +17,7 @@
   --wait:#ffad5c; --wait-bg:#33220f; --wait-line:#6b4519;
   --s-backlog:#8d99a6; --s-next:#a993ff; --s-prog:#7ea2ff; --s-uat:#4fc9bd; --s-done:#79c671;
   --err:#ff8a7a;
-  --rail-sel:rgba(255,255,255,.09);
+  --rail-sel:rgba(255,255,255,.9); --rail-sel-ink:#17212b; --rail-sel-muted:#5b6876;
   color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f141a; --surface:#171e26; --sunk:#1e2731; --line:#2c3743; --fg:#e4e9ee; --muted:#93a1af;
@@ -25,7 +25,7 @@
   --wait:#ffad5c; --wait-bg:#33220f; --wait-line:#6b4519;
   --s-backlog:#8d99a6; --s-next:#a993ff; --s-prog:#7ea2ff; --s-uat:#4fc9bd; --s-done:#79c671;
   --err:#ff8a7a;
-  --rail-sel:rgba(255,255,255,.09);
+  --rail-sel:rgba(255,255,255,.9); --rail-sel-ink:#17212b; --rail-sel-muted:#5b6876;
   color-scheme:dark}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -79,7 +79,8 @@ a{color:var(--accent)}
 .nav-i{display:flex;align-items:center;gap:9px;width:100%;border:0;background:none;padding:6px 8px;border-radius:6px;cursor:pointer;text-align:left;font-size:13.5px}
 .nav-i svg{flex:none;color:var(--muted)}
 .nav-i:hover{background:color-mix(in srgb,var(--fg) 6%,transparent)}
-.nav-i[aria-current="true"]{background:var(--rail-sel);box-shadow:0 1px 2px rgba(0,0,0,.08);font-weight:600}
+.nav-i[aria-current="true"]{background:var(--rail-sel);color:var(--rail-sel-ink);box-shadow:0 1px 2px rgba(0,0,0,.08);font-weight:600}
+.nav-i[aria-current="true"] svg,.nav-i[aria-current="true"]:not(.wait) .n{color:var(--rail-sel-muted)}
 .nav-i .nl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nav-i .n{margin-left:auto;font-family:var(--font-id);font-size:11.5px;color:var(--muted)}
 .nav-i.wait .n{background:var(--wait);color:var(--surface);padding:0 7px;border-radius:99px;font-weight:600}
