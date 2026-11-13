@@ -6,8 +6,8 @@ is `~/.claude/relay/bin/relay`, and the `relay` skill has the details.
 - **Real work gets a ticket as soon as it's clear**, before planning or writing code: anything that
   changes files, publishes or deploys, starts a build or a phase, or will need something from Adam
   later. Find one (`relay find`) or create one (`relay create`), and attach it to the session.
-- **New tickets go to the Inbox** unless Adam names the project in the chat (then `--project KEY`).
-  He files them from there in the app: into a project, a new project, or Jira.
+- **File new tickets in the right project** when you know it (the app-session app, the folder, or
+  the chat): `--project KEY`. Only when none fits does it go to the Inbox, for Adam to file.
 - **Quick questions don't**, unless they grow. Create the ticket when Adam says he'll come back to
   it, when the session is ending with nothing settled (an open question, a fix not yet tried), or
   when it turns into planning or debugging over several turns. Its first note sums up what's been

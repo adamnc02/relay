@@ -1223,12 +1223,12 @@ def format_context(data, cwd, sid=None, st=None, cap=CONTEXT_CAP):
     pkey = (proj or {}).get("key")
     lines = ["# Relay (Adam's projects board)"]
     if matched:
-        lines.append("This folder belongs to project %s (%s), so its tickets are listed below." % (pkey, proj.get("name")))
+        lines.append("This folder belongs to project %s (%s): a new ticket goes there unless the work "
+                     "is for another project (`relay create --project KEY`)." % (pkey, proj.get("name")))
     else:
-        lines.append("This folder matches no Relay project.")
-    lines.append("A new ticket goes to the Inbox (INB) unless Adam names its project in the chat "
-                 "(then `relay create --project KEY`). He files Inbox tickets into a project, or links "
-                 "them to Jira, in the app.")
+        lines.append("This folder matches no Relay project. When the project is known (the app chosen "
+                     "in app-session, or one named or clear from the chat), pass `relay create --project "
+                     "KEY`; only when none fits does the ticket go to the Inbox (INB), for Adam to file.")
     cur = current_ticket(st or {})
     if cur:
         lines.append("This session is attached to %s." % cur.get("key"))
@@ -1546,8 +1546,8 @@ def cmd_create(args):
     elif parent:
         proj = next(p for p in projects if p["id"] == parent["project_id"])
     else:
-        # New tickets land in the Inbox unless Adam names the project; he files them from there.
-        proj = inbox(projects)
+        # The folder's project, else the Inbox. A session that knows the project passes --project.
+        proj, _ = project_for(cwd, projects)
         if not proj:
             raise RelayError("no Inbox project (INB); pass --project KEY")
     attach = sid and not args.no_attach
@@ -1563,9 +1563,7 @@ def cmd_create(args):
         msg += " as phase %s of %s" % (r.get("phase"), parent["key"])
     if attach:
         remember(sid, {"id": r["id"], "key": r["key"]}, cwd)
-        # The folder's own project still says which repos the work touches.
-        here, _ = project_for(cwd, projects)
-        add_snapshots(sid, list(dict.fromkeys(snapshot_targets(cwd, project=proj) + snapshot_targets(cwd, project=here))))
+        add_snapshots(sid, snapshot_targets(cwd, project=proj))
         msg += "; attached to this session"
     print(msg + ".")
 
@@ -2398,7 +2396,7 @@ def build_parser():
     sp.add_argument("--peek", action="store_true", help="don't mark Adam's new notes as seen")
     sp = add("create", cmd_create, "Create a ticket (attached to this session unless --no-attach).")
     sp.add_argument("title")
-    sp.add_argument("--project", help="project key, only when Adam names the project in the chat (default: INB)")
+    sp.add_argument("--project", help="project key, when the work is for a known project (default: from the folder, else INB)")
     sp.add_argument("--parent", help="make it the next phase of this parent")
     sp.add_argument("--phase", type=int, help="phase number (default: the parent's next)")
     sp.add_argument("--status", choices=STATUSES, help="default: progress")

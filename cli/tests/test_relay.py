@@ -569,8 +569,8 @@ class Windows(unittest.TestCase):
         self.assertIsNone(relay.repo_root(d))
 
 
-class CreateGoesToInbox(TempHome):
-    """A new ticket lands in the Inbox unless --project names one, even from a mapped folder."""
+class CreateProject(TempHome):
+    """A new ticket goes to --project, else the folder's project, else the Inbox."""
 
     def run_create(self, project=None, cwd="/Users/a/GitHub/relay"):
         calls = []
@@ -584,7 +584,8 @@ class CreateGoesToInbox(TempHome):
             return {"id": "t1", "key": "X-1"}
         saved = (relay.q, relay.norm, relay.common_vars, relay.actor)
         relay.q = fake_q
-        relay.norm = lambda p: cwd if p == os.getcwd() else p
+        real_norm = relay.norm
+        relay.norm = lambda p, *a, **k: cwd if p == os.getcwd() else real_norm(p, *a, **k)
         relay.common_vars = lambda sid=None, cwd=None: {}
         relay.actor = lambda sid: "claude:test"
         try:
@@ -595,8 +596,14 @@ class CreateGoesToInbox(TempHome):
             relay.q, relay.norm, relay.common_vars, relay.actor = saved
         return calls[-1]["project_id"]
 
-    def test_mapped_folder_still_goes_to_inbox(self):
-        self.assertEqual(self.run_create(), "p-inb")
+    def test_mapped_folder_uses_its_project(self):
+        self.assertEqual(self.run_create(), "p-rly")
+
+    def test_unmapped_folder_goes_to_inbox(self):
+        self.assertEqual(self.run_create(cwd="/Users/a/Elsewhere"), "p-inb")
+
+    def test_named_project_beats_the_inbox(self):
+        self.assertEqual(self.run_create(project="RLY", cwd="/Users/a/Elsewhere"), "p-rly")
 
     def test_named_project_wins(self):
         self.assertEqual(self.run_create(project="rly"), "p-rly")
