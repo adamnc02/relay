@@ -142,7 +142,7 @@ Three routes, because on iOS a tap can reach the page by any one of them or none
 
 1. **`?t=KEY`** on load. After the board loads, the key (case-insensitive) is matched against `auto_key`, `jira_key`, `display_key` and `aliases`, the ticket panel opens, and `t` is removed from the address (other parameters, such as `demo`, stay). An unknown key shows "KEY isn't on this board."
 2. **`postMessage`** `{ type: 'relay:open', url }` from the worker to an open window.
-3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), then deleted. A note older than 10 minutes is ignored.
+3. **The Cache Storage note**, read on start, `focus`, `pageshow` and `visibilitychange` (visible), and every 1.5 s while the page is visible, then deleted. A note older than 10 minutes is ignored. The interval is what catches a tap on iOS while Relay is already in front: no front-coming event fires then, and the `postMessage` doesn't arrive.
 
 If none arrives, the ticket is still in Waiting for me.
 
