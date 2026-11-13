@@ -171,7 +171,7 @@ Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the ren
 
 ## Filing a ticket
 
-New tickets land in the Inbox (`INB`) unless the project is named when they're made. The ticket panel's **Project** picker moves a ticket into any project, or into a new one (**+ New project…**). A new project is `kind 'app'`; its key is the one typed, or one made from the name (the initials of several words, or the first three letters of one), and must match `^[A-Z][A-Z0-9]{1,9}$` and be unused. Its colour is the first of `APP_COLOURS` not already used by a project. A move re-keys the ticket in the new project, keeps the old ID in `aliases`, takes a parent's phases with it, and logs an `id` event. A phase shows its project as text: it moves only with its parent. A Jira-linked ticket can't move into an app project until the link is removed.
+A session files a new ticket in its project when it knows it; one with no fitting project lands in the Inbox (`INB`). The ticket panel's **Project** picker moves a ticket into any project, or into a new one (**+ New project…**). A new project is `kind 'app'`; its key is the one typed, or one made from the name (the initials of several words, or the first three letters of one), and must match `^[A-Z][A-Z0-9]{1,9}$` and be unused. Its colour is the first of `APP_COLOURS` not already used by a project. A move re-keys the ticket in the new project, keeps the old ID in `aliases`, takes a parent's phases with it, and logs an `id` event. A phase shows its project as text: it moves only with its parent. A Jira-linked ticket can't move into an app project until the link is removed.
 
 ## Jira
 
