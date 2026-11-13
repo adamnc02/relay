@@ -422,7 +422,7 @@ def psql(sql, variables=None, timeout=None):
             raise ValueError("bad psql variable name %r" % k)
         cmd += ["-v", "%s=%s" % (k, "" if v is None else str(v))]
     env = dict(os.environ)
-    env.setdefault("PGPASSFILE", os.path.expanduser("~/.pgpass"))
+    env.setdefault("PGPASSFILE", norm("~/.pgpass"))
     env["PGCONNECT_TIMEOUT"] = str(ct)
     env["PGCLIENTENCODING"] = "UTF8"
     try:
@@ -1885,7 +1885,7 @@ def cmd_doctor(args):
         check("psql", False, "not found. To " + PSQL_HINT)
     ci = conninfo_fields()
     host, port, db, user = ci.get("host", ""), ci.get("port", "5432"), ci.get("dbname", ""), ci.get("user", "")
-    pgpass = os.environ.get("PGPASSFILE") or os.path.expanduser("~/.pgpass")
+    pgpass = os.environ.get("PGPASSFILE") or norm("~/.pgpass")
     ok, detail = pgpass_entry(pgpass, host, port, db, user)
     if not ok and "chmod" not in detail:
         detail += ". Add this line (your password in place of <password>)%s:\n" \
@@ -1932,11 +1932,11 @@ def cmd_doctor(args):
                     for g in (settings.get("hooks") or {}).get(event) or [] for h in g.get("hooks") or [])
         if not found:
             missing.append("%s%s" % (event, "(%s)" % matcher if matcher else ""))
-    check("hooks", not missing, "all %d in %s/settings.json" % (len(load_hook_spec()), claude) if not missing
+    check("hooks", not missing, "all %d in %s" % (len(load_hook_spec()), os.path.join(claude, "settings.json")) if not missing
           else "missing: %s. Run %s" % (", ".join(missing), installer))
     user_problems = policy_problems(settings, managed=False)
     if user_problems:
-        check("hooks-on", False, "your %s/settings.json: %s" % (claude, "; ".join(user_problems)))
+        check("hooks-on", False, "your %s: %s" % (os.path.join(claude, "settings.json"), "; ".join(user_problems)))
     sources = managed_sources()
     problems = []
     for label, data, err in sources:
@@ -1952,7 +1952,7 @@ def cmd_doctor(args):
               if sources else "no local managed settings (file, managed-settings.d or %s)" % (
                   "registry policy" if IS_WIN else "MDM"))
     skills = [n for n in SKILLS if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
-    check("skills", not skills, "%s in %s/skills" % (", ".join(SKILLS), claude) if not skills
+    check("skills", not skills, "%s in %s" % (", ".join(SKILLS), os.path.join(claude, "skills")) if not skills
           else "missing: %s. Run %s" % (", ".join(skills), installer))
     md = os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
     for name, alias in (("close", "/relay-close"), ("relay", "/relay-tickets")):
@@ -1964,8 +1964,8 @@ def cmd_doctor(args):
             has_block = BLOCK_BEGIN in f.read()
     except OSError:
         has_block = False
-    check("rule", has_block, "ticket rule block in %s/CLAUDE.md" % claude if has_block
-          else "no Relay block in %s/CLAUDE.md. Run %s" % (claude, installer))
+    check("rule", has_block, "ticket rule block in %s" % os.path.join(claude, "CLAUDE.md") if has_block
+          else "no Relay block in %s. Run %s" % (os.path.join(claude, "CLAUDE.md"), installer))
     overrides = local_paths()
     print("info  paths.json: %s" % ("%d folder override(s)" % len(overrides) if overrides else "none"))
     print("info  session: %s" % (sid or "(none: outside Claude Code)"))
