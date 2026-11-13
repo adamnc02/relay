@@ -405,11 +405,20 @@ async function checkOpenNote() {
   } catch { /* storage blocked */ } finally { checkingNote = false; }
 }
 
-// A push that arrives while Relay is visible: the worker posts it and writes a
-// Cache Storage note (read on the same schedule as the open-intent note). iOS
-// doesn't report a tap on the notification then, so the page shows a banner.
+// Every push is handed to the page by the worker: a Cache Storage note (read on
+// the same schedule as the open-intent note) and a message. iOS doesn't report
+// a tap on the notification while Relay is in front, so the page shows a banner
+// for a push that arrived while it was in front: one stamped after the page
+// last came to the front (a few seconds' grace, in case iOS briefly hides the
+// page as the notification drops down). Anything older is dropped.
 const PUSH_NOTE_CACHE = 'relay-push-note';
 const pushNoteKey = () => new URL('./__push-note', location.href).href;
+let frontSince = document.visibilityState === 'visible' ? Date.now() : Infinity;
+document.addEventListener('visibilitychange', () => {
+  frontSince = document.visibilityState === 'visible' ? Date.now() : Infinity;
+});
+const arrivedInFront = (n) => document.visibilityState === 'visible'
+  && (n.at || 0) >= frontSince - 4000 && Date.now() - (n.at || 0) < 2 * 60e3;
 let checkingPush = false;
 async function checkPushNote() {
   if (!st.booted || typeof caches === 'undefined' || checkingPush) return;
@@ -420,7 +429,7 @@ async function checkPushNote() {
     if (!r) return;
     await c.delete(pushNoteKey());
     const n = await r.json();
-    if (Date.now() - (n.at || 0) < 2 * 60e3) showPushBanner(n);
+    if (arrivedInFront(n)) showPushBanner(n);
   } catch { /* storage blocked */ } finally { checkingPush = false; }
 }
 function showPushBanner(n) {
@@ -901,11 +910,11 @@ function bindShell() {
     if (typeof caches !== 'undefined') caches.open(OPEN_NOTE_CACHE).then((c) => c.delete(new URL('./__open-intent', location.href).href)).catch(() => {});
     openByKey(ticketParam(e.data.url));
   });
-  // A push that arrived while this window is visible (see checkPushNote).
+  // A push, posted by the worker (see checkPushNote).
   navigator.serviceWorker?.addEventListener('message', (e) => {
     if (e.data?.type !== 'relay:push') return;
     if (typeof caches !== 'undefined') caches.open(PUSH_NOTE_CACHE).then((c) => c.delete(pushNoteKey())).catch(() => {});
-    showPushBanner(e.data);
+    if (arrivedInFront(e.data)) showPushBanner(e.data);
   });
   // A new worker took over (a release): show its version.
   navigator.serviceWorker?.addEventListener('controllerchange', () => showVersion());
