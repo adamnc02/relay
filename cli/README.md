@@ -7,7 +7,8 @@ the `claude_relay` role.
 ```
 cli/
   relay                  the CLI and every hook entry point
-  install.sh             installs into ~/.claude (re-runnable)
+  install.sh             installs into ~/.claude (re-runnable), macOS
+  install.py             the same in Python: the Windows installer (also works on macOS)
   skills/relay/SKILL.md  installed to ~/.claude/skills/relay/
   skills/close/SKILL.md  installed to ~/.claude/skills/close/  (/close, /close later, /close wait)
   skills/relay-close/    /relay-close: the same as /close, under a name nothing else uses
@@ -42,9 +43,22 @@ cli/install.sh --dry-run  # print the merged settings.json and CLAUDE.md; change
 Every path is resolved from `$HOME` at install time, so the same kit installs on any Mac. Running it
 twice leaves `settings.json` and `CLAUDE.md` byte-identical.
 
-The kit runs on macOS (and other POSIX systems) only. It does not run on native Windows: it uses
-`fcntl` file locks, a `SIGALRM` hook time box, a `/bin/sh` installer and a shebang-run script, and
-`relay doctor` reads macOS managed-settings paths.
+## Windows
+
+The kit runs on native Windows with `python cli/install.py` (Python 3.8+). What differs:
+
+| | macOS | Windows |
+|---|---|---|
+| Installed CLI | `~/.claude/relay/bin/relay` (the script, run by its shebang) | `bin/relay.py` (the script), `bin/relay` (a `#!/bin/sh` wrapper for Git Bash, which is Claude Code's Bash tool on Windows) and `bin/relay.cmd` (for PowerShell and cmd). Both wrappers run the Python that ran the installer |
+| Hooks in `settings.json` | shell form: `<bin> hook <entry>` | exec form: `"command"` is the installer's `python.exe`, `"args"` is `["-X", "utf8", "<relay.py>", "hook", "<entry>"]`. No shell runs it, so Git Bash vs PowerShell doesn't matter. Paths use `/` |
+| Text encoding | UTF-8 | `-X utf8` (Python UTF-8 mode) everywhere; run without it, the CLI re-runs itself with it. psql gets `PGCLIENTENCODING=UTF8` |
+| File locks | `fcntl.flock` | `msvcrt.locking` on one byte |
+| Hook time box | `SIGALRM` | a timer thread interrupts the main thread at the budget; a second one ends the process 1 s later |
+| Background worker | `start_new_session` | `DETACHED_PROCESS` + `CREATE_NEW_PROCESS_GROUP` (+ `CREATE_BREAKAWAY_FROM_JOB` when the job allows it) |
+| psql | Homebrew libpq | `PATH`, else the newest `C:\Program Files\PostgreSQL\<ver>\bin\psql.exe` |
+| `~/.pgpass` | must be mode 600 | `%USERPROFILE%\.pgpass` (the CLI sets `PGPASSFILE`); no permission check |
+| Managed settings | `/Library/Application Support/ClaudeCode/`, MDM | `C:\Program Files\ClaudeCode\managed-settings.json` and `managed-settings.d\`, registry `HKLM` then `HKCU` `SOFTWARE\Policies\ClaudeCode` → `Settings` (one JSON object) |
+| Paths | case-sensitive | compared case-insensitively; `/` and `\` both accepted, in `paths.json` too |
 
 ## Install on another Mac
 
@@ -80,13 +94,37 @@ The kit runs on macOS (and other POSIX systems) only. It does not run on native 
    also count as the project's repos for the git snapshot.
 6. **Start a new Claude Code session.** Running sessions keep the settings they started with.
 
+## Install on Windows
+
+In PowerShell. No git and no GitHub sign-in are needed: the repo is public, so the kit comes as a ZIP.
+
+1. **Python.** `python --version` prints 3.8 or newer.
+2. **psql.** `Get-Command psql` or `Test-Path 'C:\Program Files\PostgreSQL'`. If neither finds it, run
+   the EDB installer from https://www.postgresql.org/download/windows/ and tick only **Command Line
+   Tools**.
+3. **The kit.**
+   ```powershell
+   $d = "$env:TEMP\relay-kit"; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+   Invoke-WebRequest https://github.com/adamnc02/relay/archive/refs/heads/main.zip -OutFile "$d.zip"
+   Expand-Archive "$d.zip" $d; python "$d\relay-main\cli\install.py"
+   ```
+   The download can be deleted afterwards: nothing installed points into it.
+4. **The password line.** `%USERPROFILE%\.pgpass` holds the same line as on a Mac (see above); it
+   needs no permission change. Write it without the password ever going through the clipboard
+   history or a file Claude reads, e.g. with `Read-Host -AsSecureString`, and save it as UTF-8 with
+   no BOM (`Set-Content -Encoding ascii` does that for this line).
+5. **Check.** `& "$HOME\.claude\relay\bin\relay.cmd" doctor`, then a new Claude Code session, as on a Mac.
+   `paths.json` takes Windows folders: `{"~/Code/relay": "RLY"}` or `{"C:\\Code\\relay": "RLY"}`.
+
 ### When an organisation manages Claude Code (a Team or Enterprise seat)
 
 Managed settings outrank `~/.claude/settings.json`, and some keys switch Relay's user-level parts
 off. `relay doctor`'s `managed` line reads every local managed source:
 `/Library/Application Support/ClaudeCode/managed-settings.json`, the drop-in folder
 `managed-settings.d/*.json` beside it, and the MDM profile domain `com.anthropic.claudecode`
-(`/Library/Managed Preferences/com.anthropic.claudecode.plist` and `defaults export`). It FAILs,
+(`/Library/Managed Preferences/com.anthropic.claudecode.plist` and `defaults export`). On Windows it
+reads `C:\Program Files\ClaudeCode\managed-settings.json`, `managed-settings.d\*.json` and the
+registry value `SOFTWARE\Policies\ClaudeCode` → `Settings` under HKLM and HKCU. It FAILs,
 saying which source and why, on:
 
 | Key | Effect on Relay |

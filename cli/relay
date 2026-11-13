@@ -10,7 +10,6 @@ Run `relay help` for the commands.
 
 import argparse
 import datetime
-import fcntl
 import json
 import os
 import re
@@ -21,10 +20,21 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
-VERSION = "1.0.0"
+IS_WIN = os.name == "nt"
+if IS_WIN:
+    import _thread
+    import msvcrt
+else:
+    import fcntl
+
+# Windows: child processes (psql, git) get no console window of their own.
+NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
+
+VERSION = "1.1.0"
 
 CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
                     "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
@@ -64,15 +74,38 @@ class TimeBox(Exception):
 
 
 _deadline = [None]
+_timers = []
 
 
 def start_timebox(seconds):
-    """Hooks run under a hard wall-clock limit: SIGALRM raises TimeBox."""
-    def _fire(signum, frame):
-        raise TimeBox()
-    signal.signal(signal.SIGALRM, _fire)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
+    """Hooks run under a hard wall-clock limit. POSIX: SIGALRM raises TimeBox.
+    Windows has no SIGALRM: a timer thread interrupts the main thread
+    (KeyboardInterrupt, caught like TimeBox), and a second one ends the process
+    a moment later in case the main thread is stuck in a blocking call."""
     _deadline[0] = time.time() + seconds
+    if not IS_WIN:
+        def _fire(signum, frame):
+            raise TimeBox()
+        signal.signal(signal.SIGALRM, _fire)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        return
+
+    def _hard():
+        log("time box reached; exiting")
+        os._exit(0)
+    for delay, fn in ((seconds, _thread.interrupt_main), (seconds + 1.0, _hard)):
+        t = threading.Timer(delay, fn)
+        t.daemon = True
+        t.start()
+        _timers.append(t)
+
+
+def stop_timebox():
+    if not IS_WIN:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        return
+    while _timers:
+        _timers.pop().cancel()
 
 
 def remaining(default=8.0):
@@ -115,13 +148,55 @@ def atomic_write(path, text, mode=0o644):
         with os.fdopen(fd, "w") as f:
             f.write(text)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def _replace(src, dst):
+    """os.replace. On Windows it fails while another process has dst open (a
+    reader mid-read), so it retries briefly."""
+    for i in range(20 if IS_WIN else 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if not IS_WIN or i == 19:
+                raise
+            time.sleep(0.025)
+
+
+def lock_fd(fd, blocking=True):
+    """Exclusive lock on an open file. Returns False if non-blocking and taken."""
+    if not IS_WIN:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            return True
+        except OSError:
+            if blocking:
+                raise
+            return False
+    os.lseek(fd, 0, 0)
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            if not blocking:
+                return False
+            time.sleep(0.02)
+
+
+def unlock_fd(fd):
+    if not IS_WIN:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, 0)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
 def safe_sid(sid):
@@ -143,7 +218,7 @@ def load_state(sid):
 
 
 class StateLock(object):
-    """flock around a read-modify-write of one session's state file."""
+    """A file lock around a read-modify-write of one session's state file."""
 
     def __init__(self, sid):
         self.path = os.path.join(sdir("sessions"), safe_sid(sid) + ".lock")
@@ -151,12 +226,12 @@ class StateLock(object):
 
     def __enter__(self):
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        lock_fd(self.fd)
         return self
 
     def __exit__(self, *a):
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            unlock_fd(self.fd)
         finally:
             os.close(self.fd)
 
@@ -254,16 +329,12 @@ class QueueLock(object):
 
     def __enter__(self):
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.acquired = True
-        except OSError:
-            self.acquired = False
+        self.acquired = lock_fd(self.fd, blocking=False)
         return self
 
     def __exit__(self, *a):
         if self.acquired:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            unlock_fd(self.fd)
         os.close(self.fd)
 
 
@@ -304,11 +375,37 @@ def find_psql():
     exe = os.environ.get("RELAY_PSQL") or shutil.which("psql")
     if exe:
         return exe
-    for p in ("/opt/homebrew/bin/psql", "/usr/local/bin/psql", "/opt/homebrew/opt/libpq/bin/psql",
-              "/usr/local/opt/libpq/bin/psql", "/Applications/Postgres.app/Contents/Versions/latest/bin/psql"):
+    for p in psql_candidates():
         if os.path.exists(p):
             return p
     raise DBError("psql not found")
+
+
+def psql_candidates():
+    if not IS_WIN:
+        return ("/opt/homebrew/bin/psql", "/usr/local/bin/psql", "/opt/homebrew/opt/libpq/bin/psql",
+                "/usr/local/opt/libpq/bin/psql", "/Applications/Postgres.app/Contents/Versions/latest/bin/psql")
+    # The EDB installer puts each version in its own folder; newest first.
+    found = []
+    for base in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+                 os.environ.get("LOCALAPPDATA") and os.path.join(os.environ["LOCALAPPDATA"], "Programs")):
+        root = os.path.join(base or "", "PostgreSQL")
+        try:
+            vers = os.listdir(root)
+        except OSError:
+            continue
+        for v in vers:
+            found.append((_ver_key(v), os.path.join(root, v, "bin", "psql.exe")))
+    return [p for _, p in sorted(found, reverse=True)]
+
+
+def _ver_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", v))
+
+
+PSQL_HINT = ("install PostgreSQL's command-line tools: run the EDB installer from "
+             "https://www.postgresql.org/download/windows/ and tick only \"Command Line Tools\""
+             if IS_WIN else "install it: brew install libpq && brew link --force libpq")
 
 
 def psql(sql, variables=None, timeout=None):
@@ -325,10 +422,12 @@ def psql(sql, variables=None, timeout=None):
             raise ValueError("bad psql variable name %r" % k)
         cmd += ["-v", "%s=%s" % (k, "" if v is None else str(v))]
     env = dict(os.environ)
-    env.setdefault("PGPASSFILE", os.path.expanduser("~/.pgpass"))
+    env.setdefault("PGPASSFILE", norm("~/.pgpass"))
     env["PGCONNECT_TIMEOUT"] = str(ct)
+    env["PGCLIENTENCODING"] = "UTF8"
     try:
-        r = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env)
+        r = subprocess.run(cmd, input=sql, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, env=env, **NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise DBError("Relay did not answer within %.1fs" % timeout)
     if r.returncode != 0:
@@ -362,17 +461,23 @@ def explain_db(e):
 # Paths, projects and git (pure parts are unit-tested)
 # ---------------------------------------------------------------------------
 
-def norm(p):
-    return os.path.normpath(os.path.expanduser(p)) if p else p
+def norm(p, pm=os.path):
+    """Expand ~ and normalise. On Windows this also turns / into \\."""
+    return pm.normpath(pm.expanduser(p)) if p else p
 
 
-def path_under(path, prefix):
-    path, prefix = norm(path), norm(prefix)
+def path_under(path, prefix, pm=os.path):
+    """Whether path is prefix or inside it, on whole components. Windows paths
+    compare case-insensitively. pm is os.path (tests pass ntpath/posixpath)."""
+    path, prefix = norm(path, pm), norm(prefix, pm)
     if not path or not prefix:
         return False
-    if prefix == "/":
-        return True
-    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+    a, b = pm.normcase(path), pm.normcase(prefix)
+    sep = pm.sep
+    base = b.rstrip(sep)
+    if not base or (len(base) == 2 and base[1] == ":"):  # "/" or a drive root such as C:\
+        return a.startswith(base)
+    return a == base or a.startswith(base + sep)
 
 
 def match_project(cwd, projects):
@@ -401,7 +506,8 @@ def repo_root(path):
     p = norm(path)
     if p and not os.path.isdir(p):
         p = os.path.dirname(p)
-    while p and p != "/":
+    # Stop at the filesystem root ("/" or a drive root such as C:\), which is never a repo here.
+    while p and os.path.dirname(p) != p:
         if os.path.exists(os.path.join(p, ".git")):
             return p
         p = os.path.dirname(p)
@@ -410,8 +516,9 @@ def repo_root(path):
 
 def git(args, cwd, timeout=5.0):
     try:
-        r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True,
-                           timeout=timeout, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C"))
+        r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout,
+                           env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C"), **NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -425,8 +532,8 @@ def main_worktree(path):
     out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root, 2.0)
     if not out:
         return None
-    common = out.strip()
-    return os.path.dirname(common) if common.endswith("/.git") else None
+    common = norm(out.strip())  # git prints / even on Windows
+    return os.path.dirname(common) if os.path.basename(common) == ".git" else None
 
 
 def local_paths(path=None):
@@ -543,8 +650,9 @@ def sweep_repo(root, snap, written):
     if cur is None:
         return [], None
     rel = changed_since(snap, cur, committed_since(root, snap, cur))
-    paths = sorted(os.path.join(root, r) for r in rel)
-    paths = [p for p in paths if p not in written]
+    paths = sorted(norm(os.path.join(root, r)) for r in rel)  # git's / become \ on Windows
+    seen = set(os.path.normcase(w) for w in written)
+    paths = [p for p in paths if os.path.normcase(p) not in seen]
     if len(paths) > SWEEP_CAP:
         log("sweep: %s has %d changed files; skipped" % (root, len(paths)))
         return [], cur
@@ -1053,12 +1161,23 @@ def prune_sessions():
 
 def spawn_bg(args):
     """Start `relay hook bg ...` fully detached, so it outlives the hook and the session."""
-    try:
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "hook", "bg"] + args,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, close_fds=True)
-    except Exception as e:
-        log("spawn_bg: %s" % e)
+    cmd = [sys.executable] + (["-X", "utf8"] if IS_WIN else []) + [os.path.abspath(__file__), "hook", "bg"] + args
+    io = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    if not IS_WIN:
+        try:
+            subprocess.Popen(cmd, start_new_session=True, **io)
+        except Exception as e:
+            log("spawn_bg: %s" % e)
+        return
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, plus CREATE_BREAKAWAY_FROM_JOB so the worker
+    # survives Claude Code ending the hook's job; some jobs forbid breakaway, so retry without it.
+    for flags in (0x00000008 | 0x00000200 | 0x01000000, 0x00000008 | 0x00000200):
+        try:
+            subprocess.Popen(cmd, creationflags=flags, **io)
+            return
+        except OSError as e:
+            err = e
+    log("spawn_bg: %s" % err)
 
 
 # ---------------------------------------------------------------------------
@@ -1642,13 +1761,16 @@ def pgpass_entry(path, host, port, db, user):
             continue
         parts = re.split(r"(?<!\\):", line, 4)
         if len(parts) == 5 and all(a == "*" or a == b for a, b in zip(parts[:4], want)) and parts[4]:
+            if IS_WIN:  # psql doesn't check file permissions on Windows
+                return True, "%s has an entry for %s" % (path, user)
             if st.st_mode & 0o077:
                 return False, "%s has the entry but psql ignores it: run chmod 600 %s" % (path, path)
             return True, "%s has an entry for %s (mode 600)" % (path, user)
     return False, "no line for %s in %s" % (user, path)
 
 
-MANAGED_DIR = "/Library/Application Support/ClaudeCode"
+MANAGED_DIR = r"C:\Program Files\ClaudeCode" if IS_WIN else "/Library/Application Support/ClaudeCode"
+WIN_POLICY_KEY = r"SOFTWARE\Policies\ClaudeCode"  # value "Settings": one JSON object, HKLM then HKCU
 MDM_DOMAIN = "com.anthropic.claudecode"
 SKILLS = ("relay", "close", "relay-close", "relay-tickets")
 
@@ -1693,7 +1815,9 @@ def managed_sources(managed_dir=None):
                 out.append((f, json.load(fh), None))
         except (OSError, ValueError) as e:
             out.append((f, None, "can't be read or parsed (%s)" % e.__class__.__name__))
-    if managed_dir is None and not os.environ.get("RELAY_MANAGED_DIR"):
+    if managed_dir is None and not os.environ.get("RELAY_MANAGED_DIR") and IS_WIN:
+        out += registry_sources()
+    elif managed_dir is None and not os.environ.get("RELAY_MANAGED_DIR"):
         import plistlib
         for plist in ("/Library/Managed Preferences/%s.plist" % MDM_DOMAIN,
                       os.path.expanduser("~/Library/Managed Preferences/%s.plist" % MDM_DOMAIN)):
@@ -1714,11 +1838,37 @@ def managed_sources(managed_dir=None):
     return out
 
 
+def registry_sources():
+    """Windows policy settings: HKLM, then HKCU, SOFTWARE\\Policies\\ClaudeCode, value Settings."""
+    import winreg
+    out = []
+    for hive, name in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")):
+        label = "registry %s\\%s" % (name, WIN_POLICY_KEY)
+        try:
+            with winreg.OpenKey(hive, WIN_POLICY_KEY) as k:
+                raw, _ = winreg.QueryValueEx(k, "Settings")
+        except OSError:
+            continue
+        try:
+            data = json.loads(raw)
+            out.append((label, data if isinstance(data, dict) else None,
+                        None if isinstance(data, dict) else "isn't a JSON object"))
+        except (TypeError, ValueError):
+            out.append((label, None, "can't be parsed as JSON"))
+    return out
+
+
+def installed_cli():
+    """The installed CLI file the hooks run: bin/relay, or bin/relay.py on Windows
+    (where bin/relay is a Git Bash wrapper and bin/relay.cmd a PowerShell one)."""
+    return os.path.join(home(), "bin", "relay.py" if IS_WIN else "relay")
+
+
 def cmd_doctor(args):
     """One PASS/FAIL line per check; exit 1 if any fails."""
     sid = session_id(args)
     claude = norm(os.environ.get("CLAUDE_DIR") or os.path.expanduser("~/.claude"))
-    bin_path = os.path.join(home(), "bin", "relay")
+    bin_path = installed_cli()
     fails = []
 
     def check(name, ok, detail):
@@ -1729,17 +1879,17 @@ def cmd_doctor(args):
     print("relay %s at %s · state %s" % (VERSION, os.path.abspath(__file__), home()))
     try:
         exe = find_psql()
-        ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
+        ver = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5, **NO_WINDOW).stdout.strip()
         check("psql", True, "%s (%s)" % (exe, ver))
     except Exception:
-        check("psql", False, "not found. Install it: brew install libpq && brew link --force libpq")
+        check("psql", False, "not found. To " + PSQL_HINT)
     ci = conninfo_fields()
     host, port, db, user = ci.get("host", ""), ci.get("port", "5432"), ci.get("dbname", ""), ci.get("user", "")
-    pgpass = os.environ.get("PGPASSFILE") or os.path.expanduser("~/.pgpass")
+    pgpass = os.environ.get("PGPASSFILE") or norm("~/.pgpass")
     ok, detail = pgpass_entry(pgpass, host, port, db, user)
     if not ok and "chmod" not in detail:
-        detail += ". Add this line (your password in place of <password>), then chmod 600 %s:\n" \
-                  "                 %s" % (pgpass, PGPASS_LINE)
+        detail += ". Add this line (your password in place of <password>)%s:\n" \
+                  "                 %s" % ("" if IS_WIN else ", then chmod 600 " + pgpass, PGPASS_LINE)
     check("pgpass", ok, detail)
     tcp = False
     t0 = time.time()
@@ -1766,7 +1916,11 @@ def cmd_doctor(args):
     else:
         check("login", False, "skipped (no network)")
         check("read", False, "skipped (no network)")
-    check("binary", os.access(bin_path, os.X_OK), bin_path + ("" if os.access(bin_path, os.X_OK) else " is missing: run cli/install.sh"))
+    installer = "python cli/install.py" if IS_WIN else "cli/install.sh"
+    bins = [bin_path] + ([os.path.join(home(), "bin", n) for n in ("relay", "relay.cmd")] if IS_WIN else [])
+    absent = [b for b in bins if not (os.path.isfile(b) if IS_WIN else os.access(b, os.X_OK))]
+    check("binary", not absent, ", ".join(bins) if not absent
+          else "missing: %s. Run %s" % (", ".join(absent), installer))
     try:
         with open(os.path.join(claude, "settings.json")) as f:
             settings = json.load(f)
@@ -1774,16 +1928,15 @@ def cmd_doctor(args):
         settings = {}
     missing = []
     for event, matcher, entry, timeout in load_hook_spec():
-        want = "%s hook %s" % (shlex.quote(bin_path), entry)
-        found = any(h.get("command") == want and (g.get("matcher") or None) == matcher
+        found = any(hook_matches(h, bin_path, entry) and (g.get("matcher") or None) == matcher
                     for g in (settings.get("hooks") or {}).get(event) or [] for h in g.get("hooks") or [])
         if not found:
             missing.append("%s%s" % (event, "(%s)" % matcher if matcher else ""))
-    check("hooks", not missing, "all %d in %s/settings.json" % (len(load_hook_spec()), claude) if not missing
-          else "missing: %s. Run cli/install.sh" % ", ".join(missing))
+    check("hooks", not missing, "all %d in %s" % (len(load_hook_spec()), os.path.join(claude, "settings.json")) if not missing
+          else "missing: %s. Run %s" % (", ".join(missing), installer))
     user_problems = policy_problems(settings, managed=False)
     if user_problems:
-        check("hooks-on", False, "your %s/settings.json: %s" % (claude, "; ".join(user_problems)))
+        check("hooks-on", False, "your %s: %s" % (os.path.join(claude, "settings.json"), "; ".join(user_problems)))
     sources = managed_sources()
     problems = []
     for label, data, err in sources:
@@ -1796,10 +1949,11 @@ def cmd_doctor(args):
               ". The CLI still works by hand (relay attach, notes, close), but nothing runs automatically.")
     else:
         check("managed", True, ("%d local managed source(s), none blocks user hooks or skills" % len(sources))
-              if sources else "no local managed settings (file, managed-settings.d or MDM)")
+              if sources else "no local managed settings (file, managed-settings.d or %s)" % (
+                  "registry policy" if IS_WIN else "MDM"))
     skills = [n for n in SKILLS if not os.path.exists(os.path.join(claude, "skills", n, "SKILL.md"))]
-    check("skills", not skills, "%s in %s/skills" % (", ".join(SKILLS), claude) if not skills
-          else "missing: %s. Run cli/install.sh" % ", ".join(skills))
+    check("skills", not skills, "%s in %s" % (", ".join(SKILLS), os.path.join(claude, "skills")) if not skills
+          else "missing: %s. Run %s" % (", ".join(skills), installer))
     md = os.environ.get("RELAY_MANAGED_DIR") or MANAGED_DIR
     for name, alias in (("close", "/relay-close"), ("relay", "/relay-tickets")):
         if os.path.exists(os.path.join(md, ".claude", "skills", name, "SKILL.md")):
@@ -1810,8 +1964,8 @@ def cmd_doctor(args):
             has_block = BLOCK_BEGIN in f.read()
     except OSError:
         has_block = False
-    check("rule", has_block, "ticket rule block in %s/CLAUDE.md" % claude if has_block
-          else "no Relay block in %s/CLAUDE.md. Run cli/install.sh" % claude)
+    check("rule", has_block, "ticket rule block in %s" % os.path.join(claude, "CLAUDE.md") if has_block
+          else "no Relay block in %s. Run %s" % (os.path.join(claude, "CLAUDE.md"), installer))
     overrides = local_paths()
     print("info  paths.json: %s" % ("%d folder override(s)" % len(overrides) if overrides else "none"))
     print("info  session: %s" % (sid or "(none: outside Claude Code)"))
@@ -2029,18 +2183,20 @@ def run_hook(argv):
         buf = _Buffer()
         sys.stdout = buf
         fn(inp)
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        stop_timebox()
         sys.stdout = real_stdout
         if buf.text:
             real_stdout.write(buf.text)
             real_stdout.flush()
     except BaseException as e:
         try:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            stop_timebox()
         except Exception:
             pass
         sys.stdout = real_stdout
-        log("hook %s: %s" % (event, "time box reached" if isinstance(e, TimeBox) else repr(e)))
+        # Windows' time box arrives as KeyboardInterrupt (see start_timebox).
+        boxed = isinstance(e, TimeBox) or (IS_WIN and isinstance(e, KeyboardInterrupt))
+        log("hook %s: %s" % (event, "time box reached" if boxed else repr(e)))
     return 0
 
 
@@ -2086,9 +2242,36 @@ def load_hook_spec(src=None):
     return list(HOOK_SPEC)
 
 
+def fwd(p):
+    """A path with / separators: what Windows settings.json entries use."""
+    return p.replace("\\", "/") if p else p
+
+
+def hook_entry(bin_path, name, timeout, win=IS_WIN, python=None):
+    """One settings.json hook. POSIX: a shell command that runs the script by its
+    shebang. Windows: the exec form (command = python.exe, args = the rest), so no
+    shell is involved and Git Bash vs PowerShell doesn't matter; -X utf8 makes
+    every file, pipe and stdio UTF-8 instead of the ANSI code page."""
+    if not win:
+        return {"type": "command", "command": "%s hook %s" % (shlex.quote(bin_path), name), "timeout": timeout}
+    return {"type": "command", "command": fwd(python or sys.executable),
+            "args": ["-X", "utf8", fwd(bin_path), "hook", name], "timeout": timeout}
+
+
+def hook_matches(h, bin_path, name, win=IS_WIN):
+    """Whether settings.json hook h is Relay's hook `name` for this install."""
+    h = h or {}
+    if not win:
+        return h.get("command") == "%s hook %s" % (shlex.quote(bin_path), name)
+    return (h.get("args") == ["-X", "utf8", fwd(bin_path), "hook", name]
+            and bool(h.get("command")) and os.path.isfile(h["command"]))
+
+
 def is_relay_hook(h, bin_path):
-    cmd = (h or {}).get("command") or ""
-    return RELAY_MARK in cmd or (bin_path and bin_path in cmd)
+    h = h or {}
+    text = " ".join([h.get("command") or ""] + [a for a in h.get("args") or [] if isinstance(a, str)])
+    text = fwd(text) if IS_WIN else text
+    return RELAY_MARK in text or bool(bin_path and fwd(bin_path) in text) or bool(bin_path and bin_path in text)
 
 
 def merge_hooks(settings, bin_path, spec=None):
@@ -2108,8 +2291,7 @@ def merge_hooks(settings, bin_path, spec=None):
         else:
             del hooks[event]
     for event, matcher, name, timeout in (spec or HOOK_SPEC):
-        g = {"hooks": [{"type": "command", "command": "%s hook %s" % (shlex.quote(bin_path), name),
-                        "timeout": timeout}]}
+        g = {"hooks": [hook_entry(bin_path, name, timeout)]}
         if matcher:
             g = dict([("matcher", matcher)] + list(g.items()))
         hooks.setdefault(event, []).append(g)
@@ -2283,6 +2465,11 @@ def build_parser():
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if IS_WIN and not sys.flags.utf8_mode and not os.environ.get("RELAY_NO_REEXEC"):
+        # Started without -X utf8 (e.g. `python relay.py …` by hand): run again in UTF-8
+        # mode, or briefs, skills and transcripts are read and written in the ANSI code page.
+        env = dict(os.environ, RELAY_NO_REEXEC="1")
+        return subprocess.run([sys.executable, "-X", "utf8", os.path.abspath(__file__)] + argv, env=env).returncode
     if argv and argv[0] == "hook":
         return run_hook(argv[1:])
     if not argv or argv[0] == "help":

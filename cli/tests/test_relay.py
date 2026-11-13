@@ -506,6 +506,68 @@ class Kit(unittest.TestCase):
         self.assertIn("PASS  hooks", r.stdout)
         self.assertIn("PASS  skills", r.stdout)
 
+    def test_install_py_matches_install_sh(self):
+        # install.py (the Windows installer) produces the same result as install.sh here.
+        results = []
+        for runner in (["sh", "install.sh"], [sys.executable, "install.py"]):
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d)
+            os.makedirs(os.path.join(d, ".claude"))
+            env = dict(os.environ, HOME=d, RELAY_CONNINFO="host=127.0.0.1 port=9 dbname=x user=x sslmode=disable",
+                       RELAY_MANAGED_DIR=os.path.join(d, "managed"))
+            for k in ("RELAY_HOME", "CLAUDE_DIR", "PGPASSFILE"):
+                env.pop(k, None)
+            r = subprocess.run(runner[:1] + [os.path.join(os.path.dirname(SCRIPT), runner[1])], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("PASS  hooks", r.stdout)
+            with open(os.path.join(d, ".claude", "settings.json")) as f:
+                results.append(f.read().replace(d, "<HOME>"))
+        self.assertEqual(results[0], results[1])
+
+
+class Windows(unittest.TestCase):
+    """The Windows code paths that can be checked from any OS."""
+
+    def test_path_under_ntpath(self):
+        import ntpath
+        pu = lambda a, b: relay.path_under(a, b, ntpath)
+        self.assertTrue(pu(r"C:\Users\Me\Code\relay\cli", r"C:\Users\Me\Code\relay"))
+        self.assertTrue(pu(r"c:\users\me\code\RELAY", "C:/Users/Me/Code/relay/"))  # case and / insensitive
+        self.assertFalse(pu(r"C:\Users\Me\Code\relay-test", r"C:\Users\Me\Code\relay"))
+        self.assertFalse(pu(r"D:\Code\relay", r"C:\Code\relay"))
+        self.assertTrue(pu(r"C:\anything", "C:\\"))
+
+    def test_path_under_posix_unchanged(self):
+        import posixpath
+        pu = lambda a, b: relay.path_under(a, b, posixpath)
+        self.assertTrue(pu("/a/b/c", "/a/b"))
+        self.assertFalse(pu("/a/bc", "/a/b"))
+        self.assertFalse(pu("/a/B", "/a/b"))  # case-sensitive off Windows
+        self.assertTrue(pu("/x", "/"))
+
+    def test_exec_form_hook_entry(self):
+        h = relay.hook_entry(r"C:\Users\Me\.claude\relay\bin\relay.py", "prompt", 10, win=True,
+                             python=r"C:\Python311\python.exe")
+        self.assertEqual(h, {"type": "command", "command": "C:/Python311/python.exe",
+                             "args": ["-X", "utf8", "C:/Users/Me/.claude/relay/bin/relay.py", "hook", "prompt"],
+                             "timeout": 10})
+        self.assertTrue(relay.is_relay_hook(h, None))  # recognised by RELAY_MARK in args, for re-installs
+        self.assertFalse(relay.is_relay_hook({"type": "command", "command": "C:/x/mine.exe", "args": ["go"]}, None))
+
+    def test_hook_matches_win(self):
+        bin_path = r"C:\Users\Me\.claude\relay\bin\relay.py"
+        h = relay.hook_entry(bin_path, "file", 5, win=True, python=sys.executable)
+        self.assertTrue(relay.hook_matches(h, bin_path, "file", win=True))
+        self.assertFalse(relay.hook_matches(h, bin_path, "prompt", win=True))
+        gone = dict(h, command="/no/such/python.exe")
+        self.assertFalse(relay.hook_matches(gone, bin_path, "file", win=True))
+
+    def test_repo_root_stops_at_filesystem_root(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        self.assertIsNone(relay.repo_root(d))
+
 
 if __name__ == "__main__":
     unittest.main()
