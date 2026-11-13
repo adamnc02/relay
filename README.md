@@ -88,4 +88,4 @@ See `TECHNICAL.md` for how it works.
 
 ## Claude Code integration
 
-`cli/` holds the `relay` command, the Claude Code hooks and skills that keep tickets up to date, and the installer. It runs on macOS; native Windows is not supported. See `cli/README.md`.
+`cli/` holds the `relay` command, the Claude Code hooks and skills that keep tickets up to date, and the installer. It runs on macOS and native Windows. See `cli/README.md`.
