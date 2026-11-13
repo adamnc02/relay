@@ -128,6 +128,20 @@ class Queue(TempHome):
         self.assertEqual([t["key"] for t in st["tickets"]], ["K-2", "K-1"])
         self.assertEqual(relay.current_ticket(st)["key"], "K-1")
 
+    def test_attach_after_close_reopens_session(self):
+        # /close on one ticket, then attach another: the window closing without
+        # /close must still flag the new ticket.
+        relay.remember("s2", {"id": "A", "key": "K-1"})
+        relay.update_state("s2", lambda s: s.update({"closed": True, "closed_at": 1.0}))
+        jobs = [("1", {"type": "session_end", "session": "s2"})]
+        self.assertEqual(relay.plan_flush(jobs, {"s2": relay.load_state("s2")})[1], [])
+        relay.remember("s2", {"id": "B", "key": "K-2"})
+        st = relay.load_state("s2")
+        self.assertNotIn("closed", st)
+        self.assertNotIn("closed_at", st)
+        ends = relay.plan_flush(jobs, {"s2": st})[1]
+        self.assertEqual([(n, relay.current_ticket(s)["key"]) for n, s, _ in ends], [("1", "K-2")])
+
 
 def sh(cwd, *cmd):
     subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
