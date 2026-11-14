@@ -139,7 +139,7 @@ Every key is read and written inside try/catch; the app renders the same without
 ## Phone layout (max-width 760px)
 
 - The rail becomes a slide-in drawer opened from the menu button. Choosing a view in it leaves it open: the highlight moves and the screen behind it updates. It closes with the menu button at the top of the drawer (`#railclose`), a tap on the scrim, or Escape. **Notifications** closes it, because it opens a panel.
-- The header (`.phead`) is the menu button, search and your avatar (which opens the account menu as a sheet), then a large title row with the count and an icon-only List / Board switch. A floating **New ticket** button sits bottom right over a fade from the ground colour.
+- The header (`.phead`) is the menu button, search and your avatar (which opens the account menu as a sheet), then a large title row with the count and an icon-only List / Board switch. A floating **New ticket** button sits bottom right over a fade from the ground colour (`.fabfade`, its own fixed layer one below the button, hidden with it).
 - 🚨 **The document scrolls, not an inner panel.** The header is sticky, padded by the top safe-area inset, with a blur behind it. iOS draws its blur under the status bar according to the page's own scroll position, so it only appears once content moves beneath it. With an inner scroller (the desktop layout) the page never scrolls, and iOS showed the blur over the header at rest.
 - The header gains a soft shadow (`.phead.scrolled`) only once the content has scrolled. This uses the window scroll on a phone and `#out` on desktop.
 - **Waiting for me** is a sideways scroll-snap row of 300px cards with page dots; the active dot follows the card in view. A sideways swipe there never starts a pull to refresh.
