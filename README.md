@@ -17,7 +17,7 @@ Relay is a single-user projects board: a grouped list and a kanban board of tick
 - **Waiting for me**, **All tickets** and **Archived**. Every count in the rail is of open tickets (not Done, not archived), except Archived, which counts what that view shows.
 - The projects, in sections you arrange yourself (**Projects and groups**, below). Each section folds; a folded section still shows the project you're viewing. The pencil beside a section's heading opens Projects and groups. The **Inbox** is always last, on its own.
 - **Skills** (also the `?` key): the commands a Claude Code session answers to (`Continue KEY.`, `/relay`, `/close`, `/close later`, `/close wait`), each with a Copy button. The `/close wait` row shows a ready-to-send example built from the open ticket's need (or the latest one), and its Copy button copies that.
-- **Notifications** (see below), then your name, the running version ("v14") and a **…** menu: **Appearance** (Light, Dark or System, remembered on the device), **Projects and groups**, **Notifications** and **Sign out**.
+- **Notifications** (see below), then your name, the running version ("v15") and a **…** menu: **Appearance** (Light, Dark or System, remembered on the device), **Projects and groups**, **Notifications** and **Sign out**.
 
 On a phone the rail stays open while you choose views, so the screen changes behind it; close it with the menu button at its top or by tapping outside it.
 
