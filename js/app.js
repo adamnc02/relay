@@ -540,7 +540,6 @@ function openAccount(anchor) {
     <div class="msep" role="separator"></div>
     <button class="mi" role="menuitem" id="am-projects">${I_GRID}<span>Projects and groups</span></button>
     <button class="mi" role="menuitem" id="am-notif">${I_BELL}<span>Notifications</span></button>
-    <button class="mi" role="menuitem" id="am-debug">${I_MONITOR}<span>Status bar diagnostics</span></button>
     ${isDemo() ? '' : `<div class="msep" role="separator"></div><button class="mi" role="menuitem" id="am-signout">${I_SIGNOUT}<span>Sign out</span></button>`}`,
   { cls: 'acmenu', role: 'menu', label: 'Account', how: 'above' });
   pop.querySelectorAll('[data-theme-v]').forEach((b) => (b.onclick = () => {
@@ -549,10 +548,6 @@ function openAccount(anchor) {
   }));
   $('am-projects').onclick = () => { closePop(); st.sideOpen = false; render(); openProjects(); };
   $('am-notif').onclick = () => { closePop(); st.sideOpen = false; render(); openNotifications(); };
-  $('am-debug').onclick = () => {
-    closePop(); st.sideOpen = false; render();
-    import('./debug.js').then((m) => m.openDebug({ setTheme, getTheme: () => st.theme }));
-  };
   if ($('am-signout')) $('am-signout').onclick = () => { closePop(); signOut(); };
   pop.querySelector('[aria-checked="true"]')?.focus();
 }
