@@ -1856,6 +1856,9 @@ function goOffline(snap) {
   refreshPush();
 }
 
+// Safari ignores user-scalable=no for pinch; its gesture events are the only way to stop it.
+for (const ev of ['gesturestart', 'gesturechange']) document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+
 async function boot() {
   let res;
   try {

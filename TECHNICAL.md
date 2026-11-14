@@ -146,6 +146,7 @@ Every key is read and written inside try/catch; the app renders the same without
 - The status groups are white rounded cards of rows, 56px or taller, with the ID and project on a second line.
 - The **board stacks its six columns** in one vertical scroll, with no sideways scrolling. An empty column shrinks to its heading. Drag and drop is for desktop; on a phone, status changes from the ticket panel.
 - Every control in the ticket sheet and menus is at least 44px tall.
+- **No zooming anywhere.** The viewport tag sets `maximum-scale=1, user-scalable=no`; `html` has `touch-action: pan-x pan-y` (no pinch or double-tap zoom); `gesturestart`/`gesturechange` are cancelled, because Safari ignores `user-scalable=no` for pinch. Every `input`, `textarea` and `select` is 16px on a phone: iOS zooms into a focused field under 16px.
 
 ## Offline
 
