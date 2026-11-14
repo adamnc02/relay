@@ -7,13 +7,14 @@ is `~/.claude/relay/bin/relay`, and the `relay` skill has the details.
   changes files, publishes or deploys, starts a build or a phase, or will need something from Adam
   later. Find one (`relay find`) or create one (`relay create`), and attach it to the session.
 - **File new tickets in the right project** when you know it (the app-session app, the folder, or
-  the chat): `--project KEY`. Only when none fits does it go to the Inbox, for Adam to file.
+  the chat): `--project KEY`. Only when none fits does it go to the Inbox, for Adam to file. A bug
+  fix is `--type bug`.
 - **Quick questions don't**, unless they grow. Create the ticket when Adam says he'll come back to
   it, when the session is ending with nothing settled (an open question, a fix not yet tried), or
   when it turns into planning or debugging over several turns. Its first note sums up what's been
   covered so far.
-- **At each phase end**, update the brief (`relay brief`) and post a session entry
-  (`relay session`), then set the status: wait (with the one-line need), later or done. Decisions
+- **At each phase end**, update the brief (`relay brief`), the plain-English summary
+  (`relay summary`) and post a session entry (`relay session`), then set the status: wait (with the one-line need), later or done. Decisions
   go in the brief and the commit message. Repo docs state facts only.
 - **Files outside git**: change them with Write/Edit, or log a shell change with `relay file PATH`.
 - **The kickoff is `Continue KEY.`** It loads the ticket's brief, sessions, files and docs.

@@ -16,4 +16,5 @@ typed after `/relay-close` in place of the one after `/close`:
 - `wait [need]` → `relay close wait --need "…"`
 
 The CLI is `~/.claude/relay/bin/relay`. If that skill file is missing, run the command above with a
-two-line `--summary`, then reply with the ticket ID and where it ended up.
+two-line `--summary` (after `relay summary "…"`, the plain-English summary), then reply with the
+ticket ID and where it ended up.

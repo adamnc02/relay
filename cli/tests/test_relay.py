@@ -1,7 +1,9 @@
 """Unit tests for the pure parts of cli/relay. Run: python3 -m unittest discover -s cli/tests"""
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -696,6 +698,58 @@ class Rly18(unittest.TestCase):
             self.assertRaises(relay.RelayError, relay.cmd_project, args)
         finally:
             relay.q = saved
+
+
+class Rly20(unittest.TestCase):
+    """RLY-20: ticket type and the plain-English summary."""
+
+    def run_cmd(self, argv, results):
+        calls = []
+
+        def fake_q(sql, v=None, timeout=None, dry_run=False):
+            calls.append((sql, dict(v or {})))
+            return results.get(sql)
+        saved = relay.q, relay.target, relay.session_id
+        relay.q = fake_q
+        relay.target = lambda args, sid: {"id": "00000000-0000-0000-0000-000000000001", "key": "RLY-20"}
+        relay.session_id = lambda args: "s1"
+        try:
+            args = relay.build_parser().parse_args(argv)
+            args.fn(args)
+        finally:
+            relay.q, relay.target, relay.session_id = saved
+        return calls
+
+    def test_parse(self):
+        p = relay.build_parser()
+        self.assertEqual(p.parse_args(["create", "x"]).type, "dev")
+        self.assertEqual(p.parse_args(["create", "x", "--type", "bug"]).type, "bug")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertRaises(SystemExit, p.parse_args, ["create", "x", "--type", "feature"])
+            self.assertRaises(SystemExit, p.parse_args, ["type", "chore"])
+        a = p.parse_args(["type", "bug", "--key", "LST-7"])
+        self.assertEqual((a.type, a.key), ("bug", "LST-7"))
+        a = p.parse_args(["summary", "The", "list", "works.", "--key", "LST-7"])
+        self.assertEqual((a.text, a.key), (["The", "list", "works."], "LST-7"))
+
+    def test_type_sends_the_type(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            calls = self.run_cmd(["type", "bug"], {relay.SQL_TYPE: {"key": "RLY-20", "type": "bug"}})
+        self.assertEqual(calls[-1][0], relay.SQL_TYPE)
+        self.assertEqual(calls[-1][1]["type"], "bug")
+        self.assertIn("RLY-20 is now a bug", out.getvalue())
+
+    def test_summary_writes_the_text_and_refuses_empty(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            calls = self.run_cmd(["summary", "The", "invite", "now", "works."], {relay.SQL_SUMMARY: {"key": "RLY-20", "length": 21}})
+        self.assertEqual(calls[-1][1]["text"], "The invite now works.")
+        self.assertIn("Plain summary of RLY-20 updated", out.getvalue())
+        self.assertRaises(relay.RelayError, self.run_cmd, ["summary", " "], {})
+
+    def test_create_and_get_carry_type(self):
+        self.assertIn("type)", relay.SQL_CREATE)
+        self.assertIn(":'type'", relay.SQL_CREATE)
+        self.assertIn("'summary_plain', t.summary_plain", relay.SQL_GET)
 
 
 class PsqlVariables(unittest.TestCase):

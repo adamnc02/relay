@@ -22,7 +22,10 @@ The CLI is `~/.claude/relay/bin/relay`. The argument after `/close` picks the ou
    (`relay brief`), so the next session starts from the truth.
 3. **Write the summary**: two lines on what this session finished. Collect this session's commit
    SHAs and PR URLs.
-4. **Run it**, for example:
+4. **Update the plain summary**: `relay summary "…"`, two to four plain-English sentences on the
+   issue, what's been done and what happens next, written for someone non-technical (no file
+   names, branches, PRs or jargon). The app drafts email and Teams updates from it.
+5. **Run it**, for example:
 
    ```bash
    relay close done --summary "Merged #12 (cli/ + hooks); installed globally.
@@ -36,7 +39,7 @@ The CLI is `~/.claude/relay/bin/relay`. The argument after `/close` picks the ou
    - `close` sweeps git for shell-changed files and sends the file queue first, and it clears the
      "closed without wrap-up" flag. For a parent ticket the status is left alone (it rolls up from
      its phases); the session entry is still posted.
-5. **Reply** in one or two lines with the ticket ID and where it ended up, for example
+6. **Reply** in one or two lines with the ticket ID and where it ended up, for example
    "RLY-5 → Done." **If anything is still open, say so in that reply** rather than marking it Done
    without a word. For later/wait, end with the kickoff: `Continue RLY-5.`
 

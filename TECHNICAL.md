@@ -5,18 +5,19 @@
 No build step. GitHub Pages serves `main` at the repo root under `/relay/`, so every URL in the app is relative (`./js/app.js`, `./sw.js`) and the manifest's `start_url`, `scope` and `id` are `/relay/`. `.nojekyll` stops Pages from running Jekyll.
 
 ```
-index.html            shell: rail, bars, list/board outlet, gate, drawer/modal/toast hosts
-app.css               tokens (light + dark), layout and components
-js/app.js             UI: render, ticket panel, actions, auth gate, boot, sync
+index.html            shell: theme bootstrap, rail host, header, list/board outlet, dock, gate, popover/modal/toast hosts
+app.css               tokens (light + dark), the floating canvas, components, phone layout
+js/app.js             UI: rail, list, board, ticket panel, menus, search, dialogs, actions, auth gate, boot, sync
 js/store.js           in-memory tables + the offline snapshot
-js/model.js           statuses, rollup rule, 14-day rule, Jira parsing, labels
+js/model.js           statuses, types, rollup rule, 14-day rule, Jira parsing, project labels, labels
 js/markdown.js        safe markdown subset for briefs
-js/icons.js           Handoff mark, status icons
+js/icons.js           Handoff mark, status glyphs, UI icons
+js/skills.js          the Skills popover's rows (from cli/skills/*/SKILL.md)
 js/config.js          Supabase URL + publishable key (public), schema, redirect target, VAPID public key
 js/push.js            Web Push: state, turn on/off, send test, forget on sign-out
 js/data/index.js      picks the adapter: ?demo → demo, otherwise supabase
 js/data/demo.js       in-memory adapter that mimics the database triggers
-js/data/sample.js     sample data for ?demo (the real projects, fictional tickets)
+js/data/sample.js     sample data for ?demo (the real projects, a sample Jira project, fictional tickets)
 js/data/supabase.js   PostgREST + Realtime adapter for the relay schema
 vendor/               supabase-js 2.116.0 UMD build (exposes window.supabase)
 sw.js                 service worker
@@ -28,14 +29,14 @@ The UI talks to one adapter object. Both adapters implement:
 
 - `start()` → `{ state, user?, message?, authNote? }`
 - `signIn()`, `signOut()`, `onAuthChange?(cb)`
-- `loadAll()` → rows of `projects`, `tickets`, `events`, `sessions`, `ticket_files`, `ticket_docs`
+- `loadAll()` → rows of `project_groups`, `projects`, `tickets`, `events`, `sessions`, `ticket_files`, `ticket_docs`
 - `subscribe(onChange, onStatus)` → unsubscribe
-- `insertProject`, `insertTicket`, `updateTicket(id, patch, { prevParentId })`, `insertEvent`
+- `insertProject`, `updateProject(id, patch)` (name, colour, group_id, sort), `insertGroup`, `updateGroup(id, patch)` (name, sort), `deleteGroup(id)`, `insertTicket`, `updateTicket(id, patch, { prevParentId })`, `insertEvent`
 - `savePushSubscription(row)`, `hasPushSubscription(endpoint)`, `deletePushSubscription(endpoint)`, `sendTestPush(endpoint)` (the demo adapter refuses the writes and reports no subscription)
 
 Every write resolves to a list of changes `{ table, type, row, old? }`, which the store applies by primary key. Realtime delivers the same shape, so a change that arrives twice (once from the write's response, once from Realtime) lands once.
 
-Rows keep their database shape everywhere: the UI reads `auto_key`, `display_key`, `parent_id`, `phase`, `need`, `brief`, `links`, `archived_at`, `done_at` and so on directly.
+Rows keep their database shape everywhere: the UI reads `auto_key`, `display_key`, `parent_id`, `phase`, `need`, `brief`, `links`, `type`, `summary_plain`, `group_id`, `archived_at`, `done_at` and so on directly.
 
 ### What the database owns
 
@@ -47,6 +48,8 @@ The UI never writes these; the database computes them and the adapter returns th
 - `status` events in `events`
 - `updated_by` (forced to `adam` for the signed-in user)
 - moving a ticket to another project re-keys it there, keeps the old ID in `aliases`, and moves its children with it
+- a new project's `group_id` when none is sent (the group whose `default_kind` is its kind, else the first group; never the Inbox)
+- refusing to delete a group that still has projects (23001, shown as "That group still has projects. Move them out first.")
 
 The UI writes `note`, `parent`, `archive` and `id` events itself.
 
@@ -56,7 +59,7 @@ The supabase adapter strips `id`, `seq`, `auto_key`, `display_key`, `created_at`
 
 ### Demo adapter
 
-`?demo` uses `js/data/demo.js`: no network, no sign-in, no storage of edits. It reproduces the database rules: ID assignment, re-keying on a project move, `done_at`, the parent rollup, status events, the waiting-needs-a-need check, Jira fields only in Jira projects, the parent rules (same project, one level, not itself) and ID uniqueness across `auto_key`, `jira_key` and `aliases`. The rollup itself is `rollup()` in `js/model.js`:
+`?demo` uses `js/data/demo.js`: no network, no sign-in, no storage of edits. It reproduces the database rules: ID assignment, the ticket type check, a new project's default group, the group delete refusal, re-keying on a project move, `done_at`, the parent rollup, status events, the waiting-needs-a-need check, Jira fields only in Jira projects, the parent rules (same project, one level, not itself) and ID uniqueness across `auto_key`, `jira_key` and `aliases`. The rollup itself is `rollup()` in `js/model.js`:
 
 waiting if any child waits (need = the first waiting child's need, by phase) → progress if any child is in progress or testing → done if all are done → next if any is next or done → backlog.
 
@@ -94,20 +97,56 @@ Pulling down on the List or Board (touch only) shows a strip under the header (`
 - It listens to touch events only, so desktop mouse drag and drop is never affected.
 - Once pulling, `touchmove` is `preventDefault`ed (a non-passive listener), which stops the browser's own overscroll and its native pull to refresh.
 
-## View defaults
+## Layout
 
-- The app opens on **Board**. A List/Board choice is remembered in `localStorage` `relay-view-2`. The key changed when the default became Board, so a List choice saved under the earlier key `relay-view` is ignored.
-- Exactly one rail item (the current view: Waiting for me, All tickets, Archived or a project) is marked `aria-current="true"` and filled with `--rail-sel`: a light, near-white pill in both themes. In dark mode its text and count switch to dark ink (`--rail-sel-ink`, `--rail-sel-muted`) so they stay readable on the light fill.
-- The rail lists Waiting for me, All tickets and Archived, then **Jira**, then **Apps**. Both headings fold. Apps starts folded and Jira starts open. The state is kept in `relay-rail-fold`. A folded section still lists the project currently being viewed, and shows its open-ticket total beside the heading.
-- **Version.** The rail's last line (`#sidever`) reads "Relay <VERSION>", the running service worker's `VERSION`, asked for with a `{ type: 'relay:version' }` message on a `MessageChannel`. A worker without that reply is read from the newest `relay-shell-*` cache name. It refreshes on `controllerchange`. It waits at most 3 s for `serviceWorker.ready` (which never settles when no worker is registered) and 2 s for the reply; the cache fallback sorts by the number in the name. No version found: the line is hidden.
+- **One floating canvas.** `body` and `.app` are the ground colour (`--ground`). The rail sits on it with no border; the list or board is one panel (`.pane`, 16px radius, 8px from the window's top, right and bottom edges). `.app` is a three-column grid: rail, pane, dock.
+- **The ticket panel** renders into `#drawerhost` (`.dock`, the grid's third column):
+  - above 1100px, `.app.docked` gives the dock 608px (600px plus an 8px gap) and the panel sits in the grid beside the list, with no scrim. The list stays usable and the open ticket's row or card is selected. Waiting tickets show as rows rather than cards, rows show only their time, and the header's New ticket button shows only its icon;
+  - from 761px to 1100px, the panel is a fixed overlay drawer on the right with a scrim;
+  - at 760px and below, it is a bottom sheet 54px from the top, with a grabber, and the tabs show as sections one under another.
+- **Previous / Next** step through `st.order`, the tickets in the order the current list or board drew them (cards, then each group's rows and phases; or column by column).
+- **Popovers** (menus, the account menu, Skills, search) render one at a time into `#pophost`. Escape or a click outside closes the open one, and focus returns to the control that opened it (found again by id if a re-render replaced it). Menus move focus with the arrow keys.
+- **Keys**, ignored while typing in a field: `/` and `Cmd`/`Ctrl`+`K` open search, `[` collapses or expands the rail (not on a phone), `?` toggles Skills. Escape closes the top-most popover, dialog, ticket panel or phone rail, in that order.
+
+## View defaults and stored preferences
+
+Every key is read and written inside try/catch; the app renders the same without storage.
+
+| Key | Holds |
+|---|---|
+| `relay-view-3` | `list` or `board`. The app opens on **List**. The key changed when the default became List, so a choice saved under the earlier keys (`relay-view`, `relay-view-2`) is ignored |
+| `relay-rail-collapsed` | `1` when the rail is the 64px icon rail (desktop only) |
+| `relay-rail-fold` | `{ groupId: true }` for folded rail sections. Unset, the group whose `default_kind` is `app` starts folded and the rest open |
+| `relay-ticket-tab` | the ticket panel's last tab: `brief`, `sessions`, `files`, `links` or `activity` |
+| `relay-theme` | `light`, `dark` or `system` (default) |
+| `relay:jira-base` | the last pasted Jira origin |
+
+- **Appearance.** An inline script in `index.html`'s `<head>` reads `relay-theme` before the CSS paints and sets `document.documentElement.dataset.theme` for `light` or `dark`; `system` leaves it unset, so `prefers-color-scheme` applies. The dark tokens are written twice in `app.css`, under `@media (prefers-color-scheme: dark)` guarded by `:root:not([data-theme="light"])` and under `:root[data-theme="dark"]`. Both `theme-color` meta tags are set to the active `--ground`, on load and on every change.
+- **Project colours** are each project's own `colour`, set as `--pc` on a `.sq` square. In dark mode the square is `color-mix(in oklch, var(--pc) 78%, white)`, so the stored colours need no dark copies.
+- **Rail counts** are open tickets only: not done, not archived, not hidden, never a parent (`openCount()`). Archived counts the tickets that view shows.
+- **Rail sections** come from `project_groups`, in `sort` order, each listing its projects by `sort`. The Inbox, and any project without a group, follow on their own. A folded section still lists the project currently being viewed and shows its open total.
+- Exactly one rail item (the current view) is marked `aria-current="true"`: a raised white pill in light, `#1E222A` with a faint ring in dark.
+- **Version.** The account row's second line (`#sidever`) is the running service worker's `VERSION` ("v14"), asked for with a `{ type: 'relay:version' }` message on a `MessageChannel`. A worker without that reply is read from the newest `relay-shell-*` cache name. It refreshes on `controllerchange`. It waits at most 3 s for `serviceWorker.ready` (which never settles when no worker is registered) and 2 s for the reply; the cache fallback sorts by the number in the name. No version found: the line is empty.
+- **Session live** on a board card: one of the ticket's sessions has no `ended_at` and started under 12 hours ago. A session that ended without its end hook never gets an `ended_at`, so the 12 hours keep a crashed session from showing as live for ever.
+
+## Ticket type, Draft update, Projects and groups
+
+- **Type.** `tickets.type` is `dev` or `bug`. A bug shows a 13px bug icon (`role="img"`, `aria-label="Bug"`) before its title in rows, cards, search and the panel; dev shows nothing. The panel's Type picker and the New ticket dialog's Dev / Bug choice write it. A phase has its own type.
+- **Draft update** fills two templates from `tickets.summary_plain`, the plain-English summary Claude sessions write with `relay summary` (and at `/close`), plus one line chosen by the ticket's status (`NEXT_LINE` in `js/app.js`). The need is not quoted: it is written for the owner, not for a reader outside the work. Email: an `Update: <title>` subject, "Hi [NAME],", the summary, "What happens next: …", a closing line and "Thanks, Adam". Teams: the title, the summary and the status line, with no greeting or sign-off. Edits in each tab are kept while the dialog is open; nothing is saved or sent. With no summary, the dialog names `relay summary KEY` and Copy is disabled.
+- **Projects and groups** writes through `updateProject`, `insertGroup`, `updateGroup` and `deleteGroup`, one change at a time, re-rendering after each. A drag rewrites the `sort` of every row it reorders, in steps of 10, and moves `group_id` when a project changes group. Deleting a group with projects first asks for a target group, moves its projects there, then deletes it. The Inbox can't be dragged or grouped.
+- **Project labels.** `projLabel()` shows `KEY - Name`, or just the key when the name is empty or equals the key (a Jira project created from a link is named after its key). Pickers and the New ticket dialog use it.
 
 ## Phone layout (max-width 760px)
 
-- The rail becomes a slide-in drawer opened from the menu button. Choosing a view in it leaves it open: the highlight moves and the board behind it updates. It closes with the menu button at the top of the drawer (`#railclose`; the toolbar's own is under the drawer), a tap on the scrim, or Escape. **Notifications** closes it, because it opens a panel.
-- A centred **brand row** (the Handoff mark and "Relay") sits above the toolbar, because the rail's own brand isn't visible.
-- 🚨 **The document scrolls, not an inner panel.** The brand row, toolbar and search form one sticky header (`.phead`, padded by the top safe-area inset). iOS draws its blur under the status bar according to the page's own scroll position, so it only appears once content moves beneath it. With an inner scroller (the desktop layout) the page never scrolls, and iOS showed the blur over the header at rest.
+- The rail becomes a slide-in drawer opened from the menu button. Choosing a view in it leaves it open: the highlight moves and the screen behind it updates. It closes with the menu button at the top of the drawer (`#railclose`), a tap on the scrim, or Escape. **Notifications** closes it, because it opens a panel.
+- The header (`.phead`) is the menu button, search and your avatar (which opens the account menu as a sheet), then a large title row with the count and an icon-only List / Board switch. A floating **New ticket** button sits bottom right over a fade from the ground colour (`.fabfade`, its own fixed layer one below the button, hidden with it).
+- 🚨 **The document scrolls, not an inner panel.** The header is sticky, padded by the top safe-area inset, with a blur behind it. iOS draws its blur under the status bar according to the page's own scroll position, so it only appears once content moves beneath it. With an inner scroller (the desktop layout) the page never scrolls, and iOS showed the blur over the header at rest.
 - The header gains a soft shadow (`.phead.scrolled`) only once the content has scrolled. This uses the window scroll on a phone and `#out` on desktop.
+- **Waiting for me** is a sideways scroll-snap row of 300px cards with page dots; the active dot follows the card in view. A sideways swipe there never starts a pull to refresh.
+- The status groups are white rounded cards of rows, 56px or taller, with the ID and project on a second line.
 - The **board stacks its six columns** in one vertical scroll, with no sideways scrolling. An empty column shrinks to its heading. Drag and drop is for desktop; on a phone, status changes from the ticket panel.
+- Every control in the ticket sheet and menus is at least 44px tall.
+- **No zooming anywhere.** The viewport tag sets `maximum-scale=1, user-scalable=no`; `html` has `touch-action: pan-x pan-y` (no pinch or double-tap zoom); `gesturestart`/`gesturechange` are cancelled, because Safari ignores `user-scalable=no` for pinch. Every `input`, `textarea` and `select` is 16px on a phone: iOS zooms into a focused field under 16px.
 
 ## Offline
 
@@ -120,7 +159,7 @@ After every load and change the store is saved to `localStorage` (`relay:snapsho
 - Cache name `relay-shell-<VERSION>`; bump `VERSION` when the shell file list changes. Old `relay-shell-*` caches are deleted on activate.
 - Install precaches the shell (HTML, CSS, every module, the vendored client, icons).
 - Same-origin GETs are network-first with `cache: 'no-cache'`, so a new deploy is picked up on the next load; the cache answers only when the network fails. Navigations fall back to the cached `index.html`, which also serves `?demo` offline.
-- **Fonts.** IBM Plex comes from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
+- **Fonts.** Geist and Geist Mono come from Google Fonts and is kept in its own cache, `relay-fonts`, which isn't versioned and survives a `VERSION` bump. The stylesheet (`fonts.googleapis.com`) is network-first; the font files (`fonts.gstatic.com`, versioned URLs) are cache-first. Both are requested with CORS (the stylesheet `<link>` and its preconnect carry `crossorigin`), and only `cors` responses are stored, never opaque ones.
 - Every other cross-origin request (the Supabase API, Realtime) is never intercepted or cached. The only row data on the device is the app's own snapshot.
 
 - `push` shows the notification the `relay-push` Edge Function sent (`{ title, body, tag, url }`). It always shows one, even for an unreadable payload (title "Relay"), because iOS penalises a push that shows nothing. It also hands every push to the page for an in-app banner (see "A push while Relay is in front"; it doesn't show on the iPhone).
@@ -171,13 +210,13 @@ Briefs are rendered by `js/markdown.js`. All text is HTML-escaped first; the ren
 
 ## Filing a ticket
 
-A session files a new ticket in its project when it knows it; one with no fitting project lands in the Inbox (`INB`). The ticket panel's **Project** picker moves a ticket into any project, or into a new one (**+ New project…**). A new project is `kind 'app'`; its key is the one typed, or one made from the name (the initials of several words, or the first three letters of one), and must match `^[A-Z][A-Z0-9]{1,9}$` and be unused. Its colour is the first of `APP_COLOURS` not already used by a project. A move re-keys the ticket in the new project, keeps the old ID in `aliases`, takes a parent's phases with it, and logs an `id` event. A phase shows its project as text: it moves only with its parent. A Jira-linked ticket can't move into an app project until the link is removed.
+A session files a new ticket in its project when it knows it; one with no fitting project lands in the Inbox (`INB`). The ticket panel's **Project** picker moves a ticket into any project, or into a new one (**New project…**). A new project is `kind 'app'`; its key is the one typed, or one made from the name (the initials of several words, or the first three letters of one), and must match `^[A-Z][A-Z0-9]{1,9}$` and be unused. Its colour is the first of `APP_COLOURS` not already used by a project. A move re-keys the ticket in the new project, keeps the old ID in `aliases`, takes a parent's phases with it, and logs an `id` event. A phase shows its project as text: it moves only with its parent. A Jira-linked ticket can't move into an app project until the link is removed.
 
 ## Jira
 
-- The Jira box shows on tickets in Jira projects and in the Inbox (`INB`); app tickets never show it. Linking a Jira issue to an Inbox ticket moves it into that Jira project.
+- The **Jira** and **Relay ID** properties, and the … menu's **Link Jira issue** / **Remove Jira link**, show on tickets in Jira projects and in the Inbox (`INB`); app tickets never show them. Linking a Jira issue to an Inbox ticket moves it into that Jira project.
 - A pasted URL's key is found in `?selectedIssue=KEY-1`, `/browse/KEY-1` or anywhere in the URL. A bare key gets its link from the project's `jira_base` or the last pasted Jira origin (`localStorage` `relay:jira-base`).
-- Pasting a Jira issue URL into search and pressing Enter opens the ticket with that key, or creates one in that Jira project, creating the project (`kind 'jira'`, colour `#64748B`, `jira_base` from the URL) if it doesn't exist. A key whose prefix is an app project is refused.
+- Pasting a Jira issue URL into search and pressing Enter opens the ticket with that key, or creates one in that Jira project, creating the project (`kind 'jira'`, colour `#64748B`, `jira_base` from the URL, named after its key) if it doesn't exist; the toast then offers **Rename**. A key whose prefix is an app project is refused.
 - A Relay project key must match `^[A-Z][A-Z0-9]{1,9}$`, but a Jira prefix may contain `_` or be longer. `jiraProjectKey()` maps it (drop non-alphanumerics, cut to 10), so `DATA_PLATFORM_X-7` lands in project `DATAPLATFO`, named `DATA_PLATFORM_X`. The ticket's `jira_key` keeps the `_`.
 - Linking a key from another Jira project moves the ticket there (and its phases with it). A phase can't move on its own.
 - Several tickets may link to one Jira issue (silver-octo-invention migration `20261113160000_relay_shared_jira_delete.sql`); a Jira key still can't be another ticket's `auto_key` or alias. They share a display ID, so the list shows each one's auto key beside it. Search, Enter on that key opens the ticket when only one links it and otherwise leaves the filtered list showing them all; `?t=KEY` prefers a ticket's own ID, then the first linked one.
@@ -193,7 +232,7 @@ A session files a new ticket in its project when it knows it; one with no fittin
 - **One Home Screen icon per app when testing push.** Each icon is its own app, with its own worker, storage and subscription.
 
 - **Enter that opens the panel also closes it.** The panel focuses its close button on open; without `preventDefault()` on the keydown, Chromium delivers the same Enter to that button. Both Enter handlers (search, focused row) prevent the default.
-- **Board columns sized to their text.** `min-width: max-content` on the board grid makes every `minmax(150px, 1fr)` column as wide as its longest unwrapped title (over 500px). The board's min-width is the six 150px minimums plus gaps instead, so all six columns fit beside the rail at 1280px; card rows and titles wrap inside a narrow column.
+- **Board columns sized to their text.** `min-width: max-content` on the board grid makes every `minmax(140px, 1fr)` column as wide as its longest unwrapped title (over 500px). The board's min-width is the six 140px minimums plus gaps instead, so all six columns fit beside the expanded rail at 1280px; card rows and titles wrap inside a narrow column.
 - **Duplicate element IDs in dialogs.** A modal field with id `m-title` collided with the modal heading; the heading is `m-heading`.
 - **`crypto.randomUUID` needs a secure context.** It is missing on LAN http, so `uuid()` in `js/model.js` falls back to `getRandomValues`.
 - **Stale modules.** Serve locally with `Cache-Control: no-store`; the service worker itself fetches with `cache: 'no-cache'`.

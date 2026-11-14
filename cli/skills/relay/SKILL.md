@@ -37,7 +37,9 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
    EOF
    ```
 
-   `create` attaches the new ticket to this session and puts it **In progress**. **File it in the
+   `create` attaches the new ticket to this session and puts it **In progress**. **A bug fix is
+   `--type bug`** (the board marks bugs with a bug icon); everything else is the default, dev.
+   `relay type bug|dev` changes it later. **File it in the
    right project whenever you know it**: the app chosen in app-session, or a project Adam names or
    that is clear from the chat or the board (`relay find`). Pass `--project KEY` for it. Without
    `--project`, the working folder's project is used (folder or repo, worktrees included). Only
@@ -69,12 +71,16 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
 
 ## 3. At the end of every phase (the handoff)
 
-The end-of-phase handoff is three writes, then a status:
+The end-of-phase handoff is four writes, then a status:
 
 1. **Session entry**: what closed, with commits and PRs:
    `relay session --summary "…" --open-items "…" --commit <sha> --pr <url>`
 2. **Brief update**: the brief says where things stand now and what the next phase starts from.
-3. **Status**: `relay wait "the one-line need from Adam"` when something needs him (UAT, a
+3. **Plain summary**: `relay summary "…"`, two to four sentences in plain English on the issue,
+   what's been done and what happens next, for someone non-technical. No file names, branches,
+   PRs, commands or jargon. The app's **Draft update** turns it into an email or Teams message.
+   It replaces the last one, so write it as where things stand now.
+4. **Status**: `relay wait "the one-line need from Adam"` when something needs him (UAT, a
    dashboard step, a decision); `relay later --next-step "…"` when it's parked; `relay done`
    when finished. At the end of the session `/close`, `/close later` or `/close wait` does the
    session entry and the status in one step.
@@ -88,7 +94,9 @@ Then tell Adam the kickoff for the next session: **`Continue KEY.`** (the phase'
 | `relay context` | What the SessionStart hook injects, for this folder |
 | `relay find TEXT [--all] [--project KEY]` | Search IDs, aliases, Jira keys, titles and briefs |
 | `relay get KEY [--all] [--peek]` | The handoff: brief, last 3 sessions (`--all`: every one), files by repo, docs, links, phases, the parent's plan, recent activity. Marks Adam's new notes seen unless `--peek` |
-| `relay create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--no-attach]` | New ticket; the database assigns the ID |
+| `relay create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--type dev\|bug] [--no-attach]` | New ticket; the database assigns the ID |
+| `relay type dev\|bug [--key K]` | Set the ticket's type |
+| `relay summary TEXT…\|- [--key K]` | Replace the plain-English summary the app's Draft update reads |
 | `relay attach KEY` | Attach this session to a ticket (the last one attached is the current one) |
 | `relay brief [--key K] [--next-step S]` | Replace the brief with stdin |
 | `relay session [--key K] --summary S [--open-items O] [--commit SHA]… [--pr URL]…` | Add to this session's entry |

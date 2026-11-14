@@ -5,7 +5,7 @@
 
 import { SUPABASE_URL, SUPABASE_ANON_KEY, SCHEMA, redirectTo, SUPABASE_JS_VERSION } from '../config.js';
 
-const TABLES = ['projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs'];
+const TABLES = ['project_groups', 'projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs'];
 const ATTEMPT_KEY = 'relay:auth:attempt';
 const PAGE = 1000;
 
@@ -176,9 +176,31 @@ export function createSupabaseAdapter() {
       );
     },
 
+    // name, colour, group_id, sort. kind and key never change from the app.
+    async updateProject(id, patch) {
+      const clean = {};
+      for (const k of ['name', 'colour', 'group_id', 'sort']) if (k in patch) clean[k] = patch[k];
+      return one('projects', 'UPDATE')(await client.from('projects').update(clean).eq('id', id).select().single());
+    },
+
+    async insertGroup(f) {
+      return one('project_groups', 'INSERT')(await client.from('project_groups').insert({ name: f.name, sort: f.sort ?? 0 }).select().single());
+    },
+    async updateGroup(id, patch) {
+      const clean = {};
+      for (const k of ['name', 'sort']) if (k in patch) clean[k] = patch[k];
+      return one('project_groups', 'UPDATE')(await client.from('project_groups').update(clean).eq('id', id).select().single());
+    },
+    // The database refuses a group that still has projects (on delete restrict).
+    async deleteGroup(id) {
+      const { error } = await client.from('project_groups').delete().eq('id', id);
+      if (error) throw error;
+      return [{ table: 'project_groups', type: 'DELETE', row: null, old: { id } }];
+    },
+
     async insertTicket(f) {
       const row = { project_id: f.project_id, title: f.title, updated_by: 'adam' };
-      for (const k of ['status', 'need', 'brief', 'parent_id', 'phase', 'jira_key', 'jira_url']) if (f[k] != null) row[k] = f[k];
+      for (const k of ['status', 'need', 'brief', 'parent_id', 'phase', 'jira_key', 'jira_url', 'type']) if (f[k] != null) row[k] = f[k];
       const changes = one('tickets', 'INSERT')(await client.from('tickets').insert(row).select().single());
       const t = changes[0].row;
       const p = await client.from('projects').select('*').eq('id', t.project_id).single();

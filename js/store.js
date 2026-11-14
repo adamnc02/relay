@@ -2,7 +2,7 @@
 // Realtime. Every apply is idempotent (keyed by primary key), so a change that
 // arrives both from a write's response and from Realtime lands once.
 
-export const TABLES = ['projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs'];
+export const TABLES = ['project_groups', 'projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs'];
 const keyOf = (table, row) => (table === 'ticket_files' || table === 'ticket_docs' ? `${row.ticket_id}|${row.path}` : String(row.id));
 
 export function createStore() {
