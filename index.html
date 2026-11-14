@@ -17,6 +17,11 @@
     var c = t === 'dark' ? '#0B0D11' : '#F1F2F4';
     document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = c; });
   }
+  // Installed iPhone app: no theme-color. iOS paints the status bar from theme-color once, at launch, and
+  // ignores later changes; without it the black-translucent bar shows the page and follows the theme.
+  if (navigator.standalone === true) {
+    document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.remove(); });
+  }
 })();
 </script>
 <meta name="apple-mobile-web-app-capable" content="yes">
