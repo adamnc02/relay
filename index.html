@@ -19,8 +19,11 @@
   }
   // Installed iPhone app: no theme-color. iOS paints the status bar from theme-color once, at launch, and
   // ignores later changes; without it the black-translucent bar shows the page and follows the theme.
+  // It also fixes the status bar from the page's color-scheme at launch, so the installed app declares none
+  // (.ios-app in app.css) and the bar keeps following the page.
   if (navigator.standalone === true) {
     document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.remove(); });
+    document.documentElement.classList.add('ios-app');
   }
 })();
 </script>
