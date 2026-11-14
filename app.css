@@ -77,7 +77,7 @@ a:hover{color:var(--accent-h)}
 /* project colour square: the project's own colour in light, lifted ~15% in dark */
 .sq{--pc:#9AA3AF;width:10px;height:10px;border-radius:3px;flex:none;display:inline-block;background:var(--pc)}
 .pcol .pc-stroke{stroke:var(--pc)} .pcol .pc-fill{fill:var(--pc)}
-/* Installed iPhone app: no color-scheme, so iOS keeps following the page under the status bar (index.html). */
+/* Installed iPhone app: no color-scheme, as BLOC (see the head script in index.html). */
 :root.ios-app{color-scheme:normal!important}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .sq{background:color-mix(in oklch,var(--pc) 78%,white)}
   :root:not([data-theme="light"]) .pcol .pc-stroke{stroke:color-mix(in oklch,var(--pc) 78%,white)}
