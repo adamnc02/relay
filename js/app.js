@@ -6,7 +6,7 @@ import { esc, renderMarkdown } from './markdown.js';
 import {
   handoff, sicon, parentIcon, bugMark, I_ALL, I_ARCH, I_SKILLS, I_BELL, I_COLLAPSE, I_EXPAND, I_SEARCH, I_PLUS, I_COPY, I_LINK,
   I_UP, I_DOWN, I_CARET, CHEV, I_MORE, I_CLOSE, I_SEND, I_SUN, I_MOON, I_MONITOR, I_GRID, I_SIGNOUT, I_LISTV, I_BOARDV, I_MENU,
-  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE, I_CLIP, I_DL, I_UPLOAD, I_FILE,
+  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE, I_CLIP, I_DL, I_UPLOAD, I_FILE, I_CLIPBOARD,
 } from './icons.js';
 import { createAdapter, isDemo } from './data/index.js';
 import { createStore, saveSnapshot, readSnapshot, clearSnapshot } from './store.js';
@@ -987,7 +987,7 @@ const extOf = (name) => (/\.([a-z0-9]{1,5})$/i.exec(name || '')?.[1] || '').toUp
 function attPanel(x, atts) {
   const ro = st.readOnly;
   const ups = st.uploads.filter((u) => u.ticketId === x.id);
-  const head = ro ? '' : `<div class="att-drop" id="d-att-drop"><button class="btn" id="d-att-up">${I_UPLOAD}Upload files</button><span class="hint">or drop them here. Any type, up to 50 MB each.</span><input type="file" id="d-att-file" multiple hidden></div>`;
+  const head = ro ? '' : `<div class="att-drop" id="d-att-drop"><button class="btn" id="d-att-up">${I_UPLOAD}Upload files</button>${canReadClipboard() ? `<button class="btn" id="d-att-paste">${I_CLIPBOARD}Paste</button>` : ''}<span class="hint">or drop or paste them here. Any type, up to 50 MB each.</span><input type="file" id="d-att-file" multiple hidden></div>`;
   const rows = ups.map((u) => `<li class="att-row up"><span class="att-th">${I_FILE}</span><div class="att-m"><span class="att-n">${esc(u.name)}</span><span class="att-s">Uploading… · ${fmtSize(u.size)}</span></div></li>`).join('')
     + atts.map((a) => {
       const u = attUrl(a.id);
@@ -1051,9 +1051,74 @@ async function downloadAttachment(a) {
     toast(isNetworkError(e) ? "Couldn't reach Relay." : "Couldn't get that file.");
   }
 }
+const on2 = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+// ---------- paste ----------
+// A pasted screenshot is attached to the open ticket. Browsers call every
+// pasted image "image.png", so a pasted file with a generic name is renamed
+// after the time it was pasted.
+const MIME_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/heic': 'heic', 'image/heif': 'heif', 'image/tiff': 'tiff', 'image/bmp': 'bmp', 'image/svg+xml': 'svg' };
+function stampName(type, i = 0) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const ext = MIME_EXT[type] || (type.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'bin';
+  return `Screenshot ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}${i ? ` (${i + 1})` : ''}.${ext}`;
+}
+function named(files) {
+  return files.map((f, i) => (/^image\.[a-z0-9]+$/i.test(f.name || '') || !f.name ? new File([f], stampName(f.type || 'application/octet-stream', i), { type: f.type, lastModified: f.lastModified }) : f));
+}
+function onPaste(e) {
+  if (!st.openId || st.readOnly || $('modalhost').innerHTML || $('pophost').innerHTML) return;
+  const x = D.tby.get(st.openId);
+  if (!x) return;
+  const cd = e.clipboardData;
+  const files = [...(cd?.files || [])];
+  if (!files.length) return; // text: the browser pastes it as usual
+  const t = e.target;
+  const typing = t instanceof Element && t.closest('input, textarea, [contenteditable="true"]');
+  // In a text box, text on the clipboard goes into the box (a copied
+  // spreadsheet cell carries an image of itself as well as its text).
+  if (typing && (cd.getData('text/plain') || '').trim()) return;
+  // Only on the ticket panel, or with nothing in particular focused.
+  if (t instanceof Element && !t.closest('#drawerhost') && t !== document.body && t !== document.documentElement) return;
+  e.preventDefault();
+  uploadFiles(x, named(files));
+}
+const canReadClipboard = () => !!(navigator.clipboard && navigator.clipboard.read && window.isSecureContext);
+async function pasteFromClipboard(x) {
+  let items;
+  try {
+    items = await navigator.clipboard.read();
+  } catch (e) {
+    if (e?.name === 'NotAllowedError') toast("Relay wasn't allowed to read the clipboard.");
+    else toast("There's nothing to paste.");
+    return;
+  }
+  const files = [];
+  for (const item of items) {
+    const type = item.types.find((ty) => ty.startsWith('image/')) || item.types.find((ty) => !ty.startsWith('text/'));
+    if (!type) continue;
+    const blob = await item.getType(type);
+    files.push(new File([blob], stampName(type, files.length), { type }));
+  }
+  if (!files.length) { toast("There's no image on the clipboard. Copy a screenshot first."); return; }
+  uploadFiles(x, files);
+}
 function wireAttachments(x, atts) {
   const host = $('drawerhost');
   const byId = new Map(atts.map((a) => [a.id, a]));
+  // An image the browser can't draw (a damaged file, a format it doesn't
+  // know such as HEIC in Chromium) shows the file icon instead.
+  host.querySelectorAll('[data-att-img]').forEach((img) => {
+    img.onerror = () => {
+      const a = byId.get(img.dataset.attImg);
+      const th = img.parentElement;
+      if (!th) return;
+      th.classList.remove('img');
+      th.innerHTML = `${I_FILE}<span class="ext">${esc(extOf(a?.name))}</span>`;
+    };
+    // It may have failed before this handler was set (a link already signed).
+    if (img.getAttribute('src') && img.complete && !img.naturalWidth) img.onerror();
+  });
   // Signed whenever the panel shows the ticket: a phone shows every section at
   // once, and links that already hold a fresh URL are not signed again.
   if (atts.length) signAtts(atts);
@@ -1077,6 +1142,7 @@ function wireAttachments(x, atts) {
   const input = $('d-att-file');
   if (input) {
     $('d-att-up').onclick = () => input.click();
+    on2('d-att-paste', () => pasteFromClipboard(x));
     input.onchange = () => { const fs = [...input.files]; input.value = ''; if (fs.length) uploadFiles(x, fs); };
   }
   // Files dropped anywhere on the ticket panel are attached to it.
@@ -1742,6 +1808,7 @@ function setRail(collapsed) {
   $('railtoggle')?.focus({ preventScroll: true });
 }
 function bindShell() {
+  document.addEventListener('paste', onPaste);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (closePop()) return;
