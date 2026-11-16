@@ -63,6 +63,7 @@ export const I_TRASH = sv(14, '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13
 export const I_CLIP = sv(14, '<path d="m21 11-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.2a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5"/>', ' stroke-width="2"');
 export const I_DL = sv(14, '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>', ' stroke-width="2"');
 export const I_UPLOAD = sv(14, '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>', ' stroke-width="2"');
+export const I_CLIPBOARD = sv(14, '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>', ' stroke-width="2"');
 export const I_FILE = sv(18, '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>', ' stroke-width="1.7"');
 export const I_CODE = sv(14, '<path d="m8 8-4 4 4 4M16 8l4 4-4 4"/>', ' stroke-width="2"');
 export const I_BUG = sv(14, '<rect x="8" y="6" width="8" height="14" rx="4"/><path d="M12 20v-8M8 13H4M20 13h-4M9 7 7 4M15 7l2-3M8.5 17l-3 2M15.5 17l3 2"/>', ' stroke-width="2"');
