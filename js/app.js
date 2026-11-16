@@ -6,7 +6,7 @@ import { esc, renderMarkdown } from './markdown.js';
 import {
   handoff, sicon, parentIcon, bugMark, I_ALL, I_ARCH, I_SKILLS, I_BELL, I_COLLAPSE, I_EXPAND, I_SEARCH, I_PLUS, I_COPY, I_LINK,
   I_UP, I_DOWN, I_CARET, CHEV, I_MORE, I_CLOSE, I_SEND, I_SUN, I_MOON, I_MONITOR, I_GRID, I_SIGNOUT, I_LISTV, I_BOARDV, I_MENU,
-  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE,
+  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE, I_CLIP, I_DL, I_UPLOAD, I_FILE,
 } from './icons.js';
 import { createAdapter, isDemo } from './data/index.js';
 import { createStore, saveSnapshot, readSnapshot, clearSnapshot } from './store.js';
@@ -34,6 +34,7 @@ const st = {
   rail: false, // collapsed to the 64px icon rail (desktop only)
   tab: 'brief', // the ticket panel's tab
   descDraft: null, // { id, value } while a ticket's description is being edited
+  uploads: [], // { n, ticketId, name, size } for files still uploading
   theme: 'system',
   version: '',
   order: [], // the current view's tickets, in screen order, for Previous / Next
@@ -49,7 +50,7 @@ const st = {
   } catch { /* bad JSON */ }
   st.rail = load('relay-rail-collapsed') === '1';
   const tab = load('relay-ticket-tab');
-  if (['brief', 'sessions', 'files', 'links', 'activity'].includes(tab)) st.tab = tab;
+  if (['brief', 'attachments', 'sessions', 'files', 'links', 'activity'].includes(tab)) st.tab = tab;
   const th = load('relay-theme');
   if (th === 'light' || th === 'dark') st.theme = th;
 }
@@ -81,7 +82,8 @@ function derive() {
   const sessions = group(store.rows('sessions').sort((a, b) => ts(a.started_at) - ts(b.started_at)), 'ticket_id');
   const files = group(store.rows('ticket_files').sort((a, b) => ts(b.last_at) - ts(a.last_at)), 'ticket_id');
   const docs = group(store.rows('ticket_docs').sort((a, b) => ts(a.added_at) - ts(b.added_at)), 'ticket_id');
-  D = { now, groups, gby, pby, projects, tickets, tby, kids, events, sessions, files, docs };
+  const atts = group(store.rows('attachments').sort((a, b) => ts(b.created_at) - ts(a.created_at)), 'ticket_id');
+  D = { now, groups, gby, pby, projects, tickets, tby, kids, events, sessions, files, docs, atts };
 }
 const kidsOf = (t) => D.kids.get(t.id) || [];
 const isParent = (t) => D.kids.has(t.id);
@@ -407,12 +409,12 @@ function toast(msg, action) {
 }
 
 // A small modal form. fields: [{ id, label, type: 'text'|'textarea'|'select'|'seg', value, options, placeholder }]
-function ask({ title, fields, ok = 'Save' }) {
+function ask({ title, fields, ok = 'Save', message = '' }) {
   return new Promise((resolve) => {
     const host = $('modalhost');
     const back = document.activeElement;
     host.innerHTML = `<div class="scrim" data-cancel style="z-index:40"></div><form class="modal" role="dialog" aria-modal="true" aria-labelledby="m-heading">
-      <h2 id="m-heading">${esc(title)}</h2>
+      <h2 id="m-heading">${esc(title)}</h2>${message ? `<p class="hint">${esc(message)}</p>` : ''}
       ${fields.map((f) => `<div class="field">${f.type === 'seg' ? `<span class="lbl" id="m-${f.id}-l">${esc(f.label)}</span>` : `<label class="lbl" for="m-${f.id}">${esc(f.label)}</label>`}${
         f.type === 'select' ? `<select id="m-${f.id}">${f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === f.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`
         : f.type === 'seg' ? `<div class="seg" role="radiogroup" aria-labelledby="m-${f.id}-l" id="m-${f.id}" data-value="${esc(f.value)}">${f.options.map((o) => `<button type="button" role="radio" aria-checked="${o.value === f.value}" data-v="${esc(o.value)}">${o.icon || ''}${esc(o.label)}</button>`).join('')}</div>`
@@ -434,7 +436,7 @@ function ask({ title, fields, ok = 'Save' }) {
     };
     host.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = () => done(null)));
     form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
-    const first = $('m-' + fields[0].id);
+    const first = fields.length ? $('m-' + fields[0].id) : form.querySelector('[type="submit"]');
     (first.querySelector?.('button') || first).focus();
   });
 }
@@ -962,6 +964,137 @@ function wireDesc(x) {
   $('d-desc-cancel').onclick = cancel;
   $('d-desc-save').onclick = save;
 }
+// ---------- attachments ----------
+// Files on a ticket, in the private Storage bucket. The rows come with the
+// board; a file's address is a signed URL, fetched for the open ticket and
+// kept for 8 minutes (the adapter signs them for 10).
+const ATT_MAX = 52428800;
+const attUrls = new Map(); // attachment id → { url, at }
+const attFetching = new Set();
+let uploadSeq = 0;
+function attUrl(id) {
+  const c = attUrls.get(id);
+  return c && Date.now() - c.at < 8 * 6e4 ? c.url : null;
+}
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+}
+const isImage = (a) => /^image\//.test(a.mime || '');
+const extOf = (name) => (/\.([a-z0-9]{1,5})$/i.exec(name || '')?.[1] || '').toUpperCase();
+function attPanel(x, atts) {
+  const ro = st.readOnly;
+  const ups = st.uploads.filter((u) => u.ticketId === x.id);
+  const head = ro ? '' : `<div class="att-drop" id="d-att-drop"><button class="btn" id="d-att-up">${I_UPLOAD}Upload files</button><span class="hint">or drop them here. Any type, up to 50 MB each.</span><input type="file" id="d-att-file" multiple hidden></div>`;
+  const rows = ups.map((u) => `<li class="att-row up"><span class="att-th">${I_FILE}</span><div class="att-m"><span class="att-n">${esc(u.name)}</span><span class="att-s">Uploading… · ${fmtSize(u.size)}</span></div></li>`).join('')
+    + atts.map((a) => {
+      const u = attUrl(a.id);
+      const href = u ? `href="${esc(u)}"` : 'href="#"';
+      return `<li class="att-row"><a class="att-th${isImage(a) ? ' img' : ''}" ${href} target="_blank" rel="noopener noreferrer" data-att-open="${esc(a.id)}" tabindex="-1" aria-hidden="true">${isImage(a) ? `<img alt="" data-att-img="${esc(a.id)}" ${u ? `src="${esc(u)}"` : ''}>` : `${I_FILE}<span class="ext">${esc(extOf(a.name))}</span>`}</a>
+        <div class="att-m"><a class="att-n" ${href} target="_blank" rel="noopener noreferrer" data-att-open="${esc(a.id)}" title="Open ${esc(a.name)}">${esc(a.name)}</a><span class="att-s">${fmtSize(a.size_bytes)} · ${esc(ago(a.created_at))}${a.created_by && !isAdam(a.created_by) ? ' · by Claude' : ''}</span></div>
+        <button class="ib sm" data-att-dl="${esc(a.id)}" aria-label="Download ${esc(a.name)}" title="Download">${I_DL}</button>${ro ? '' : `<button class="ib sm" data-att-del="${esc(a.id)}" aria-label="Delete ${esc(a.name)}" title="Delete">${I_TRASH}</button>`}</li>`;
+    }).join('');
+  return head + (rows ? `<ul class="att-list">${rows}</ul>` : `<div class="empty-t">No attachments yet.${ro ? '' : ' Add screenshots, logs or any file the work needs.'}</div>`);
+}
+function showAttUrl(id, url) {
+  document.querySelectorAll(`#drawerhost [data-att-open="${CSS.escape(id)}"]`).forEach((el) => (el.href = url));
+  document.querySelectorAll(`#drawerhost [data-att-img="${CSS.escape(id)}"]`).forEach((el) => { if (!el.getAttribute('src')) el.src = url; });
+}
+async function signAtts(rows) {
+  const need = rows.filter((a) => !attUrl(a.id) && !attFetching.has(a.id));
+  if (!need.length || !adapter.attachmentUrls) return;
+  need.forEach((a) => attFetching.add(a.id));
+  try {
+    const m = await adapter.attachmentUrls(need);
+    for (const [id, url] of Object.entries(m)) { attUrls.set(id, { url, at: Date.now() }); showAttUrl(id, url); }
+  } catch (e) {
+    console.warn('[relay] could not sign attachment links:', e?.message);
+  } finally {
+    need.forEach((a) => attFetching.delete(a.id));
+  }
+}
+async function uploadFiles(x, files) {
+  if (!guard()) return;
+  if (st.tab !== 'attachments') { st.tab = 'attachments'; save('relay-ticket-tab', st.tab); }
+  for (const f of files) {
+    if (f.size > ATT_MAX) { toast(`${f.name} is over 50 MB, so it wasn't uploaded.`); continue; }
+    const u = { n: ++uploadSeq, ticketId: x.id, name: f.name || 'file', size: f.size };
+    st.uploads.push(u);
+    if (st.openId === x.id) renderDrawer();
+    await run(() => adapter.uploadAttachment(x.id, f), `Uploaded ${f.name || 'the file'}`);
+    st.uploads = st.uploads.filter((y) => y !== u);
+    if (st.openId === x.id) renderDrawer();
+  }
+}
+async function deleteAttachment(a) {
+  const v = await ask({ title: `Delete ${a.name}?`, message: "It's removed from Relay for good. This can't be undone.", fields: [], ok: 'Delete' });
+  if (!v) return;
+  const ch = await run(() => adapter.deleteAttachment(a), `Deleted ${a.name}`);
+  if (ch) attUrls.delete(a.id);
+}
+async function downloadAttachment(a) {
+  try {
+    const m = await adapter.attachmentUrls([a], { download: true });
+    const url = m[a.id];
+    if (!url) throw new Error('No link');
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = a.name;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (e) {
+    console.warn('[relay] download failed:', e);
+    toast(isNetworkError(e) ? "Couldn't reach Relay." : "Couldn't get that file.");
+  }
+}
+function wireAttachments(x, atts) {
+  const host = $('drawerhost');
+  const byId = new Map(atts.map((a) => [a.id, a]));
+  // Signed whenever the panel shows the ticket: a phone shows every section at
+  // once, and links that already hold a fresh URL are not signed again.
+  if (atts.length) signAtts(atts);
+  host.querySelectorAll('[data-att-open]').forEach((el) => (el.onclick = (e) => {
+    if (attUrl(el.dataset.attOpen)) return; // the link already holds a fresh signed URL
+    e.preventDefault();
+    const a = byId.get(el.dataset.attOpen);
+    if (!a) return;
+    // Opened before the request, so the browser treats it as the tap's own window.
+    const w = window.open('', '_blank');
+    adapter.attachmentUrls([a]).then((m) => {
+      const url = m[a.id];
+      if (!url) throw new Error('No link');
+      attUrls.set(a.id, { url, at: Date.now() });
+      showAttUrl(a.id, url);
+      if (w) w.location = url; else window.open(url, '_blank', 'noopener');
+    }).catch(() => { w?.close(); toast("Couldn't open that file."); });
+  }));
+  host.querySelectorAll('[data-att-dl]').forEach((b) => (b.onclick = () => { const a = byId.get(b.dataset.attDl); if (a) downloadAttachment(a); }));
+  host.querySelectorAll('[data-att-del]').forEach((b) => (b.onclick = () => { const a = byId.get(b.dataset.attDel); if (a) deleteAttachment(a); }));
+  const input = $('d-att-file');
+  if (input) {
+    $('d-att-up').onclick = () => input.click();
+    input.onchange = () => { const fs = [...input.files]; input.value = ''; if (fs.length) uploadFiles(x, fs); };
+  }
+  // Files dropped anywhere on the ticket panel are attached to it.
+  const drawer = host.querySelector('.drawer');
+  if (drawer && !st.readOnly) {
+    const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+    drawer.ondragover = (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; drawer.classList.add('dropping'); };
+    drawer.ondragleave = (e) => { if (!drawer.contains(e.relatedTarget)) drawer.classList.remove('dropping'); };
+    drawer.ondrop = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      drawer.classList.remove('dropping');
+      const fs = [...e.dataTransfer.files];
+      if (fs.length) uploadFiles(x, fs);
+    };
+  }
+}
+
 async function rename(t, title) {
   if (!title || title === t.title) { render(); return; }
   await run(() => adapter.updateTicket(t.id, { title }), 'Renamed');
@@ -1205,7 +1338,8 @@ function renderDrawer(fresh = false) {
   const prHref = safeHref(prPr);
   const prText = prPr ? (prPr.match(/\/pull\/(\d+)/) ? '#' + prPr.match(/\/pull\/(\d+)/)[1] : prPr.replace(/^PR\s*/i, '')) : '';
   const tab = st.tab;
-  const tabs = [['brief', isP ? 'Plan' : 'Brief', null], ['sessions', 'Sessions', sessions.length], ['files', 'Files', allFiles.length], ['links', 'Links', docs.length + links.length], ['activity', 'Activity', null]];
+  const atts = D.atts.get(x.id) || [];
+  const tabs = [['brief', isP ? 'Plan' : 'Brief', null], ['attachments', 'Attachments', atts.length + st.uploads.filter((u) => u.ticketId === x.id).length], ['sessions', 'Sessions', sessions.length], ['files', 'Files', allFiles.length], ['links', 'Links', docs.length + links.length], ['activity', 'Activity', null]];
   const panel = (id, html) => `<div class="tp" role="tabpanel" id="tp-${id}" aria-labelledby="tab-${id}" ${tab === id ? '' : 'hidden'}><div class="tp-h">${esc(tabs.find((t) => t[0] === id)[1])}</div>${html}</div>`;
   const nextStep = x.next_step && !(x.brief || '').includes(x.next_step) ? `<div class="nextstep"><div class="k">Next step</div><div class="mdl"><p>${esc(x.next_step)}</p></div></div>` : '';
   const updatedBy = isAdam(x.updated_by) ? 'you' : /^hook/.test(x.updated_by || '') ? 'a hook' : 'Claude';
@@ -1245,6 +1379,7 @@ function renderDrawer(fresh = false) {
     <div>
       <div class="tabs" role="tablist" aria-label="Ticket detail">${tabs.map(([id, label, n]) => `<button class="tab" role="tab" id="tab-${id}" aria-controls="tp-${id}" aria-selected="${tab === id}" tabindex="${tab === id ? 0 : -1}" data-tab="${id}">${label}${n ? `<span class="c">${n}</span>` : ''}</button>`).join('')}</div>
       ${panel('brief', (x.brief && x.brief.trim() ? `<div class="mdl">${renderMarkdown(x.brief)}</div>` : `<div class="empty-t">No ${isP ? 'plan' : 'brief'} yet. Claude writes it when a session picks this ticket up.</div>`) + nextStep)}
+      ${panel('attachments', attPanel(x, atts))}
       ${panel('sessions', isP && !sessions.length ? '<div class="empty-t">Sessions are logged on each phase.</div>' : sessions.length ? `<ol class="sess">${sessions.slice().reverse().map((s) => `<li><div class="h"><span>${ago(s.ended_at || s.started_at)} · ${esc(s.machine || 'Session')}</span><span>${esc(CLOSED_BY[s.closed_by] || (s.ended_at ? '' : 'In progress'))}</span></div>${s.summary ? `<div>${esc(s.summary)}</div>` : ''}${s.open_items ? `<div class="open">Left open: ${esc(s.open_items)}</div>` : ''}${(s.prs || []).length || (s.commits || []).length ? `<div class="open mono" style="font-size:11.5px">${esc([...(s.prs || []).map((v) => 'PR ' + v), ...(s.commits || []).map((c) => c.slice(0, 7))].join(' · '))}</div>` : ''}</li>`).join('')}</ol>` : '<div class="empty-t">No sessions yet.</div>')}
       ${panel('files', allFiles.length ? `<div class="files">${isP ? '<p class="hint" style="margin-top:8px">Across all phases.</p>' : ''}${fileGroups(allFiles)}</div>` : '<div class="empty-t">No files changed yet.</div>')}
       ${panel('links', docs.length || links.length ? `<div class="lk">${docs.map((d) => `<div class="frow"><code>${esc(d.path)}</code><span class="kind">${esc(d.label || 'Reference doc')}</span><button class="cp" data-copy="${esc(d.path)}">Copy path</button></div>`).join('')}${links.map(([k, v]) => `<div class="frow"><span>${linkValue(v)}</span><span class="k">${esc(LINK_LABEL[k] || k)}</span><span></span></div>`).join('')}</div>` : '<div class="empty-t">No reference docs or links yet.</div>')}
@@ -1310,6 +1445,7 @@ function renderDrawer(fresh = false) {
     h2.onkeydown = (e) => { if (e.key === 'Enter') edit(); };
   }
   wireDesc(x);
+  wireAttachments(x, atts);
 
   if (keep) {
     if (keep.note && $('d-note')) $('d-note').value = keep.note;
