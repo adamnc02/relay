@@ -34,7 +34,7 @@ const TICKETS = [
   ['RLY-4', 'backlog', 'Phase 2: the PWA', 0.2, { parent: 'RLY-1', phase: 2 }],
   ['RLY-5', 'backlog', 'Phase 3: skills, hooks and the handoff import', 0.2, { parent: 'RLY-1', phase: 3 }],
   ['RLY-6', 'backlog', 'Phase 4: push when something needs you', 0.2, { parent: 'RLY-1', phase: 4 }],
-  ['LST-7', 'waiting', 'Shared list invite fails on second device', 1.2, { type: 'bug', need: 'Run UAT on phone: open invite link signed in as the second account, confirm the list appears.', next: 'Merge PR #41 once UAT passes.', links: { branch: 'fix/invite-second-device', pr: '#41' }, summary: "A shared list didn't appear when the invite was opened on a second device. We've found the cause and a fix is ready: the app now waits until you're signed in before it opens the invite, so the list appears straight away. I'm testing the fix on a phone today, and once that passes it goes live." }],
+  ['LST-7', 'waiting', 'Shared list invite fails on second device', 1.2, { type: 'bug', desc: "When I open the invite link on Ella's phone it signs her in, but the shared list never shows up. It works if she closes the app and opens it again.", need: 'Run UAT on phone: open invite link signed in as the second account, confirm the list appears.', next: 'Merge PR #41 once UAT passes.', links: { branch: 'fix/invite-second-device', pr: '#41' }, summary: "A shared list didn't appear when the invite was opened on a second device. We've found the cause and a fix is ready: the app now waits until you're signed in before it opens the invite, so the list appears straight away. I'm testing the fix on a phone today, and once that passes it goes live." }],
   ['SFL-14', 'waiting', 'Recurring transfers double-post on month end', 5, { type: 'bug', need: "Run the cleanup block in SQL editor (claude_ro can't drop its own UAT policy), then say done.", next: 'Verify 0 rows, then open live PR.', links: { branch: 'fix/month-end-recurring', pr: '#88 (test)' } }],
   ['PCH-9', 'progress', 'Seed demo data for meal-plan export', 0.3, { summary: 'The demo is getting a few sample recipes so the new meal-plan export can be tried without an account. The recipes are being added now, and the export will be checked on the demo before it goes live.', next: 'Add three demo recipes with export enabled; UAT on ?demo.', links: { branch: 'feat/mealplan-export' } }],
   ['DSK-21', 'progress', 'BYOR: map column picker to SOW fields', 2, { wrapup: true, next: 'Finish field mapping for rate and duration.', links: { branch: 'main' } }],
@@ -44,7 +44,7 @@ const TICKETS = [
   ['BLC-58', 'next', "Phase 4: Coach dashboard shows the new cycle dates", 20, { parent: 'BLC-50', phase: 4, next: 'Start after Phase 3 UAT passes.' }],
   ['BLC-52', 'testing', "Phase 3: Fix Casey's cycle starting a day late", 20, { parent: 'BLC-50', phase: 3, next: 'UAT on test coach (Hotmail) at cycle 3.', links: { branch: 'fix/cycle-tz', pr: '#203' } }],
   ['MDC-4', 'testing', 'Disable snapshot upload on UAT copy', 50, { next: 'Confirm UAT copy has no upload calls in network tab.', links: { branch: 'chore/uat-no-snapshot', pr: '#12' } }],
-  ['LST-8', 'next', 'Offline add-item queue', 72, { next: 'Design the queue; start in finance-style test copy.' }],
+  ['LST-8', 'next', 'Offline add-item queue', 72, { desc: 'Adding items with no signal in the supermarket should just work:\n\n- keep the item on the list straight away\n- send it when the signal comes back\n- never lose one', next: 'Design the queue; start in finance-style test copy.' }],
   ['BLC-53', 'backlog', 'Retire 2025-09-26/bloc-brand folder', 120, { next: 'Move items to BACKLOG.md first.' }],
   ['DSK-19', 'backlog', 'Native chart export to PNG', 200, {}],
   ['PLG-12', 'done', 'Category totals ignore split transactions', 96, { links: { pr: '#80' } }],
@@ -173,7 +173,7 @@ export function buildSample(now = Date.now()) {
     p.next_seq = Math.max(p.next_seq, seq + 1);
     const t = {
       id: uuid(), project_id: p.id, seq, auto_key: auto, jira_key: x.jira || null, jira_url: x.jira ? p.jira_base + x.jira : null, display_key: x.jira || auto,
-      type: x.type || 'dev', summary_plain: x.summary || null,
+      type: x.type || 'dev', summary_plain: x.summary || null, description: x.desc || null,
       aliases: [], title, status, priority: 0, need: x.need || null, brief: BRIEFS[auto] || '',
       next_step: x.next || null, parent_id: null, phase: x.phase ?? null, links: x.links || {},
       updated_by: 'claude:sample', session_ids: [], needs_wrapup: !!x.wrapup,

@@ -22,8 +22,8 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
    without wrap-up. Mark it done, or carry on?"
 2. **Kickoff `Continue KEY.`**: the prompt hook normally attaches the ticket and injects its
    handoff with your prompt. If you don't see a "Relay: this session is now attached" block, run
-   `relay attach KEY` and `relay get KEY` yourself. Read the whole handoff before acting: brief,
-   last sessions, files, docs and new notes. For a phase, the parent's plan comes with it.
+   `relay attach KEY` and `relay get KEY` yourself. Read the whole handoff before acting: Adam's
+   description (what he wants, in his own words), brief, last sessions, files, docs and new notes. For a phase, the parent's plan comes with it.
 3. **New work**: look for an existing ticket first (`relay find WORDS`). If there's none:
 
    ```bash
@@ -120,7 +120,8 @@ Any text works in briefs, needs and notes, en dashes included.
 
 ## Rules the database enforces
 
-A waiting ticket must have a need. A phase's parent has no parent and is in the same project. Jira
+A waiting ticket must have a need. The description is Adam's: Claude can't set or change it
+(write the brief instead). A phase's parent has no parent and is in the same project. Jira
 fields exist only on tickets in Jira projects, and Adam's apps never go into Jira. IDs are unique
 across auto keys, Jira keys and aliases, except that several tickets may share one Jira key. `relay` reports these as "Relay refused this (rule)" or
 "(that ID is taken)": fix the input rather than working around the rule.
