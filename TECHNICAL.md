@@ -29,9 +29,10 @@ The UI talks to one adapter object. Both adapters implement:
 
 - `start()` → `{ state, user?, message?, authNote? }`
 - `signIn()`, `signOut()`, `onAuthChange?(cb)`
-- `loadAll()` → rows of `project_groups`, `projects`, `tickets`, `events`, `sessions`, `ticket_files`, `ticket_docs`
+- `loadAll()` → rows of `project_groups`, `projects`, `tickets`, `events`, `sessions`, `ticket_files`, `ticket_docs`, `attachments` (an `attachments` table that isn't there yet, PGRST205 or 42P01, loads as none)
 - `subscribe(onChange, onStatus)` → unsubscribe
 - `insertProject`, `updateProject(id, patch)` (name, colour, group_id, sort), `insertGroup`, `updateGroup(id, patch)` (name, sort), `deleteGroup(id)`, `insertTicket`, `updateTicket(id, patch, { prevParentId })`, `insertEvent`
+- `uploadAttachment(ticketId, file)`, `deleteAttachment(row)`, `attachmentUrls(rows, { download })` → `{ id: url }` (see Attachments)
 - `savePushSubscription(row)`, `hasPushSubscription(endpoint)`, `deletePushSubscription(endpoint)`, `sendTestPush(endpoint)` (the demo adapter refuses the writes and reports no subscription)
 
 Every write resolves to a list of changes `{ table, type, row, old? }`, which the store applies by primary key. Realtime delivers the same shape, so a change that arrives twice (once from the write's response, once from Realtime) lands once.
@@ -117,7 +118,7 @@ Every key is read and written inside try/catch; the app renders the same without
 | `relay-view-3` | `list` or `board`. The app opens on **List**. The key changed when the default became List, so a choice saved under the earlier keys (`relay-view`, `relay-view-2`) is ignored |
 | `relay-rail-collapsed` | `1` when the rail is the 64px icon rail (desktop only) |
 | `relay-rail-fold` | `{ groupId: true }` for folded rail sections. Unset, the group whose `default_kind` is `app` starts folded and the rest open |
-| `relay-ticket-tab` | the ticket panel's last tab: `brief`, `sessions`, `files`, `links` or `activity` |
+| `relay-ticket-tab` | the ticket panel's last tab: `brief`, `attachments`, `sessions`, `files`, `links` or `activity` |
 | `relay-theme` | `light`, `dark` or `system` (default) |
 | `relay:jira-base` | the last pasted Jira origin |
 
@@ -137,6 +138,17 @@ Every key is read and written inside try/catch; the app renders the same without
 - **Draft update** fills two templates from `tickets.summary_plain`, the plain-English summary Claude sessions write with `relay summary` (and at `/close`), plus one line chosen by the ticket's status (`NEXT_LINE` in `js/app.js`). The need is not quoted: it is written for the owner, not for a reader outside the work. Email: an `Update: <title>` subject, "Hi [NAME],", the summary, "What happens next: …", a closing line and "Thanks, Adam". Teams: the title, the summary and the status line, with no greeting or sign-off. Edits in each tab are kept while the dialog is open; nothing is saved or sent. With no summary, the dialog names `relay summary KEY` and Copy is disabled.
 - **Projects and groups** writes through `updateProject`, `insertGroup`, `updateGroup` and `deleteGroup`, one change at a time, re-rendering after each. A drag rewrites the `sort` of every row it reorders, in steps of 10, and moves `group_id` when a project changes group. Deleting a group with projects first asks for a target group, moves its projects there, then deletes it. The Inbox can't be dragged or grouped.
 - **Project labels.** `projLabel()` shows `KEY - Name`, or just the key when the name is empty or equals the key (a Jira project created from a link is named after its key). Pickers and the New ticket dialog use it.
+
+## Attachments
+
+Files on a ticket live in the private Storage bucket `relay-attachments` (50 MB each, any type), one row each in `relay.attachments`; see silver-octo-invention `docs/relay-SUPABASE.md` → Attachments.
+
+- **Upload.** `uploadAttachment` first checks there is a session (a lapsed one would upload as `anon` and be refused: MIGRATION-LESSONS §77), puts the object at `<ticket id>/<uuid>/<name>` (the name with characters Storage refuses replaced by `_`; the row keeps the name as it was), then inserts the row. If the row is refused, the object is removed again, so the bucket holds no file without a row. The app refuses a file over 50 MB before sending it; the bucket refuses one too.
+- **Delete** removes the object through the Storage API, then the row. 🚨 Nothing in SQL can delete an object (MIGRATION-LESSONS §70), so the order matters: a row deleted first would leave an object nothing points at.
+- **Links.** The bucket is private, so every link is a signed URL, made for 10 minutes (`createSignedUrls`, one request for the open ticket's files) and reused for 8 (`attUrls` in `js/app.js`). They are signed whenever the panel shows a ticket with files, because the phone shows every section at once. Opening a file before its link is ready opens a blank window first, inside the tap, and points it at the URL when it arrives, so the browser doesn't block it as a popup. **Download** asks for a URL signed with `download: <name>`, so Storage sends it as an attachment under its own name.
+- **Drop.** Files dragged onto the ticket panel (`.drawer`) are uploaded to that ticket and the Attachments tab is shown. Only drags carrying `Files` are taken, so dragging text or a card is unaffected.
+- **While uploading** each file shows as a pulsing row (`st.uploads`) until its row arrives; files go up one after another.
+- **Demo.** The demo adapter keeps uploads as blob URLs in the tab (nothing leaves the browser) and LST-7 carries two sample files built from `SAMPLE_FILES` in `js/data/sample.js`.
 
 ## Phone layout (max-width 760px)
 

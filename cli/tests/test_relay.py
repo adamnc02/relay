@@ -762,6 +762,92 @@ class Rly20(unittest.TestCase):
         self.assertNotIn("## Description", relay.format_get(d))
 
 
+class Attachments(unittest.TestCase):
+    """RLY-21: relay get lists a ticket's attachments; relay attachment downloads
+    them through a one-time grant and the relay-files function."""
+
+    ATTS = [{"id": "a1", "name": "screen shot.png", "mime": "image/png", "size_bytes": 48213},
+            {"id": "a2", "name": "console-log.txt", "mime": "text/plain", "size_bytes": 195}]
+
+    def test_publishable_key_matches_the_app(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        cfg = open(os.path.join(here, "..", "..", "js", "config.js"), encoding="utf-8").read()
+        self.assertIn("'%s'" % relay.PUBLISHABLE_KEY, cfg)
+        self.assertIn("'%s'" % relay.SUPABASE_URL, cfg)
+
+    def test_get_lists_attachments(self):
+        self.assertIn("from relay.attachments a join t", relay.SQL_GET)
+        d = {"ticket": {"key": "RLY-21", "title": "Files", "status": "progress", "project": "RLY", "project_name": "Relay"},
+             "attachments": [{"name": "screen shot.png", "mime": "image/png", "size_bytes": 48213, "added": "2026-11-16 12:30"}]}
+        out = relay.format_get(d)
+        self.assertIn("## Attachments (1): download with `relay attachment RLY-21`", out)
+        self.assertIn("- screen shot.png — 47 KB · image/png · 2026-11-16 12:30", out)
+        self.assertNotIn("## Attachments", relay.format_get({"ticket": d["ticket"]}))
+
+    def test_pick_and_names(self):
+        p = relay.pick_attachments
+        self.assertEqual(p(self.ATTS, []), self.ATTS)
+        self.assertEqual([a["id"] for a in p(self.ATTS, ["2"])], ["a2"])
+        self.assertEqual([a["id"] for a in p(self.ATTS, ["SCREEN", "screen shot.png"])], ["a1"])
+        self.assertRaises(relay.RelayError, p, self.ATTS, ["nothing"])
+        self.assertEqual(relay.local_name('a:b/c?.png'), "a_b_c_.png")
+        self.assertEqual(relay.local_name("..."), "file")
+        self.assertEqual(relay.human_size(195), "195 B")
+        self.assertEqual(relay.human_size(52428800), "50 MB")
+
+    def run_download(self, argv, http):
+        calls, posted = [], []
+        out_dir = tempfile.mkdtemp()
+
+        def fake_q(sql, v=None, timeout=None, dry_run=False):
+            calls.append((sql, dict(v or {})))
+            if sql == relay.SQL_ATTACHMENTS:
+                return self.ATTS
+            if sql == relay.SQL_ATTACHMENT_GRANT:
+                return {"token": "tok-" + v["aid"]}
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=None):
+            if isinstance(req, str):
+                return Resp(b"bytes of " + req.encode())
+            posted.append((req.full_url, req.headers.get("Apikey"), json.loads(req.data)))
+            return http(req)
+        saved = relay.q, relay.target, relay.session_id, relay.urllib.request.urlopen
+        relay.q, relay.session_id = fake_q, (lambda args: "s1")
+        relay.target = lambda args, sid: {"id": "t1", "key": args.key or "RLY-21"}
+        relay.urllib.request.urlopen = fake_open
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                args = relay.build_parser().parse_args(argv + ["--out", out_dir])
+                args.fn(args)
+        finally:
+            relay.q, relay.target, relay.session_id, relay.urllib.request.urlopen = saved
+        return calls, posted, out.getvalue(), out_dir
+
+    def test_download_one_by_name(self):
+        ok = lambda req: io.BytesIO(json.dumps({"url": "https://signed/" + json.loads(req.data)["token"]}).encode())
+        ok_ctx = lambda req: type("R", (io.BytesIO,), {"__enter__": lambda s: s, "__exit__": lambda s, *a: False})(ok(req).read())
+        calls, posted, out, d = self.run_download(["attachment", "RLY-21", "console"], ok_ctx)
+        self.assertEqual(posted, [(relay.FILES_FN, relay.PUBLISHABLE_KEY, {"token": "tok-a2"})])
+        path = os.path.join(d, "console-log.txt")
+        self.assertEqual(open(path, "rb").read(), b"bytes of https://signed/tok-a2")
+        self.assertIn(path, out)
+        self.assertFalse(os.path.exists(path + ".part"))
+
+    def test_refused_pass(self):
+        def refuse(req):
+            raise relay.urllib.error.HTTPError(relay.FILES_FN, 404, "nf", {}, None)
+        with self.assertRaises(relay.RelayError) as e:
+            self.run_download(["attachment", "1"], refuse)
+        self.assertIn("refused", str(e.exception))
+
+
 class PsqlVariables(unittest.TestCase):
     """Values reach psql as \\set lines on stdin, never argv (RLY-18: on Windows
     argv is in the ANSI code page, so en dashes broke every :'name')."""

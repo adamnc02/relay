@@ -13,6 +13,7 @@ export function createDemoAdapter() {
   const db = buildSample();
   let nextEventId = db.nextEventId;
   let listener = null;
+  const blobs = new Map(); // attachment id → blob URL
   const nowIso = () => new Date().toISOString();
   const proj = (id) => db.projects.find((p) => p.id === id);
   const tick = (id) => db.tickets.find((t) => t.id === id);
@@ -92,8 +93,8 @@ export function createDemoAdapter() {
     async signOut() {},
 
     async loadAll() {
-      const { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs } = db;
-      return clone({ project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs });
+      const { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs, attachments } = db;
+      return clone({ project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs, attachments });
     },
 
     subscribe(onChange, onStatus) {
@@ -219,6 +220,33 @@ export function createDemoAdapter() {
 
     // Push needs an account and a server: the demo has neither. The UI shows
     // the demo state and never calls these.
+    // Attachments live in this tab only, as blob URLs; nothing is uploaded.
+    async uploadAttachment(ticketId, file) {
+      if (!tick(ticketId)) fail('Ticket not found.');
+      if (file.size > 52428800) fail('That file is over 50 MB.');
+      const id = uuid();
+      const row = { id, ticket_id: ticketId, path: `${ticketId}/${uuid()}/${file.name || 'file'}`, name: file.name || 'file',
+        mime: file.type || null, size_bytes: file.size, created_by: 'adam', created_at: nowIso(), updated_at: nowIso() };
+      db.attachments.push(row);
+      blobs.set(id, URL.createObjectURL(file));
+      return [{ table: 'attachments', type: 'INSERT', row: clone(row) }];
+    },
+    async deleteAttachment(row) {
+      db.attachments = db.attachments.filter((a) => a.id !== row.id);
+      return [{ table: 'attachments', type: 'DELETE', row: null, old: { id: row.id } }];
+    },
+    async attachmentUrls(rows) {
+      const out = {};
+      for (const r of rows) {
+        if (!blobs.has(r.id) && db.sampleFiles[r.id]) {
+          const f = db.sampleFiles[r.id];
+          blobs.set(r.id, URL.createObjectURL(new Blob([f.body], { type: f.type })));
+        }
+        if (blobs.has(r.id)) out[r.id] = blobs.get(r.id);
+      }
+      return out;
+    },
+
     async savePushSubscription() { fail("The demo can't turn notifications on."); },
     async hasPushSubscription() { return false; },
     async deletePushSubscription() {},

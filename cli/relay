@@ -22,6 +22,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 IS_WIN = os.name == "nt"
@@ -34,11 +36,17 @@ else:
 # Windows: child processes (psql, git) get no console window of their own.
 NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
                     "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
 TZ = "Europe/London"
+# Attachments: the relay-files Edge Function swaps a one-time grant (minted by
+# relay.attachment_grant as claude_relay) for a short-lived signed URL. The key
+# is the project's publishable key, public by design (the app's js/config.js).
+SUPABASE_URL = "https://nxekrfdagkdwhjuunsrl.supabase.co"
+PUBLISHABLE_KEY = "sb_publishable_hv-9Mb3Y36PklJ2Yo4KBhw_XEy3z5lP"
+FILES_FN = SUPABASE_URL + "/functions/v1/relay-files"
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]+-R?[0-9]+$")   # an auto key, alias or Jira key
 PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 JIRA_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
@@ -890,6 +898,9 @@ select json_build_object(
             from relay.ticket_files f where f.ticket_id in (select id from fam)),
   'docs', (select coalesce(json_agg(json_build_object('path', d.path, 'label', d.label) order by d.added_at), '[]')
            from relay.ticket_docs d join t on d.ticket_id = t.id),
+  'attachments', (select coalesce(json_agg(json_build_object('name', a.name, 'mime', a.mime, 'size_bytes', a.size_bytes,
+                    'added', to_char(a.created_at at time zone :'tz', 'YYYY-MM-DD HH24:MI')) order by a.created_at), '[]')
+           from relay.attachments a join t on a.ticket_id = t.id),
   'events', (select coalesce(json_agg(x.j order by x.at desc), '[]') from (
                select e.at, json_build_object('at', to_char(e.at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
                  'actor', e.actor, 'kind', e.kind, 'body', e.body, 'from', e.from_status, 'to', e.to_status,
@@ -1534,6 +1545,13 @@ def format_get(d, all_sessions=False):
             rel = os.path.relpath(f["path"], root)
             out.append("  %s — %s ×%d · %s" % (rel, ", ".join(f.get("kinds") or []) or "?",
                                               f.get("times") or 1, f.get("last")))
+    atts = d.get("attachments") or []
+    if atts:
+        out.append("")
+        out.append("## Attachments (%d): download with `relay attachment %s`, then read them" % (len(atts), t["key"]))
+        for a in atts:
+            out.append("- %s — %s%s · %s" % (a["name"], human_size(a.get("size_bytes")),
+                                           " · " + a["mime"] if a.get("mime") else "", a.get("added") or ""))
     docs = d.get("docs") or []
     if docs:
         out.append("")
@@ -2073,6 +2091,100 @@ def cmd_doc(args):
     v.update({"tid": t["id"], "path": path, "label": args.label or ""})
     q(SQL_DOC, v)
     print("Doc %s added to %s." % (path, t["key"]))
+
+
+SQL_ATTACHMENTS = """
+select coalesce(json_agg(json_build_object('id', a.id, 'name', a.name, 'mime', a.mime, 'size_bytes', a.size_bytes)
+                order by a.created_at), '[]')
+  from relay.attachments a where a.ticket_id = :'tid'::uuid
+"""
+
+SQL_ATTACHMENT_GRANT = "select relay.attachment_grant(:'aid'::uuid)"
+
+
+def human_size(n):
+    n = int(n or 0)
+    if n < 1024:
+        return "%d B" % n
+    if n < 1048576:
+        return "%d KB" % round(n / 1024.0)
+    return ("%.1f MB" if n < 10485760 else "%.0f MB") % (n / 1048576.0)
+
+
+def local_name(name):
+    """A file name that is safe on macOS and Windows."""
+    n = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name or "file").strip(" .")
+    return n[-150:] or "file"
+
+
+def pick_attachments(atts, wanted):
+    """Each wanted entry is a 1-based number, an exact name or part of one."""
+    if not wanted:
+        return list(atts)
+    out = []
+    for w in wanted:
+        if w.isdigit() and 1 <= int(w) <= len(atts):
+            hit = [atts[int(w) - 1]]
+        else:
+            hit = [a for a in atts if a["name"] == w] or [a for a in atts if w.lower() in a["name"].lower()]
+        if not hit:
+            raise RelayError("no attachment matches %r (there are: %s)" % (w, ", ".join(a["name"] for a in atts)))
+        out += [a for a in hit if a not in out]
+    return out
+
+
+def fetch_attachment(a, dest):
+    """One-time grant → relay-files → signed URL → file. Returns the path."""
+    grant = q(SQL_ATTACHMENT_GRANT, {"aid": a["id"]})
+    if not grant or not grant.get("token"):
+        raise RelayError("Relay gave no download pass for %s" % a["name"])
+    req = urllib.request.Request(FILES_FN, data=json.dumps({"token": grant["token"]}).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "application/json", "apikey": PUBLISHABLE_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            info = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RelayError("%s: the download pass was refused or the file is gone from storage" % a["name"])
+        raise RelayError("%s: relay-files answered %s" % (a["name"], e.code))
+    except (urllib.error.URLError, OSError) as e:
+        raise RelayError("%s: couldn't reach relay-files (%s)" % (a["name"], getattr(e, "reason", e)))
+    os.makedirs(dest, exist_ok=True)
+    path = os.path.join(dest, local_name(a["name"]))
+    tmp = path + ".part"
+    try:
+        with urllib.request.urlopen(info["url"], timeout=300) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        os.replace(tmp, path)
+    except (urllib.error.URLError, OSError) as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise RelayError("%s: the download failed (%s)" % (a["name"], getattr(e, "reason", e)))
+    return path
+
+
+def cmd_attachment(args):
+    sid = session_id(args)
+    words = list(args.what or [])
+    if words and not args.key and KEY_RE.match(words[0].strip().upper().rstrip(".")):
+        args.key = words.pop(0)
+    t = target(args, sid)
+    atts = q(SQL_ATTACHMENTS, {"tid": t["id"]}) or []
+    if not atts:
+        print("%s has no attachments." % t["key"])
+        return
+    if args.list:
+        for i, a in enumerate(atts, 1):
+            print("%d. %s — %s%s" % (i, a["name"], human_size(a.get("size_bytes")), " · " + a["mime"] if a.get("mime") else ""))
+        return
+    chosen = pick_attachments(atts, words)
+    dest = os.path.abspath(os.path.expanduser(args.out)) if args.out else os.path.join(tempfile.gettempdir(), "relay-attachments", t["key"])
+    print("Downloading %d attachment(s) of %s to %s" % (len(chosen), t["key"], dest))
+    for a in chosen:
+        path = fetch_attachment(a, dest)
+        print("  %s  (%s%s)" % (path, human_size(a.get("size_bytes")), ", " + a["mime"] if a.get("mime") else ""))
 
 
 def cmd_file(args):
@@ -2879,6 +2991,12 @@ def build_parser():
     sp.add_argument("path")
     sp.add_argument("--label")
     sp.add_argument("--key")
+    sp = add("attachment", cmd_attachment, "Download a ticket's attachments (files Adam attached in the app) to read them.")
+    sp.add_argument("what", nargs="*", metavar="[KEY] [NAME|N]",
+                    help="the ticket (default: this session's), then names, parts of names or numbers (default: all)")
+    sp.add_argument("--key")
+    sp.add_argument("--out", help="folder to save into (default: <temp>/relay-attachments/KEY)")
+    sp.add_argument("--list", action="store_true", help="list them, numbered, without downloading")
     sp = add("file", cmd_file, "Log files changed outside Write/Edit (default kind: shell).")
     sp.add_argument("path", nargs="+")
     sp.add_argument("--kind", choices=("shell", "write", "edit"), default="shell")

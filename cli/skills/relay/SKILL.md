@@ -23,7 +23,9 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
 2. **Kickoff `Continue KEY.`**: the prompt hook normally attaches the ticket and injects its
    handoff with your prompt. If you don't see a "Relay: this session is now attached" block, run
    `relay attach KEY` and `relay get KEY` yourself. Read the whole handoff before acting: Adam's
-   description (what he wants, in his own words), brief, last sessions, files, docs and new notes. For a phase, the parent's plan comes with it.
+   description (what he wants, in his own words), brief, last sessions, files, docs and new notes.
+   When it lists **Attachments** (screenshots, logs, files Adam attached in the app), download them
+   with `relay attachment KEY` and read them with the Read tool before acting. For a phase, the parent's plan comes with it.
 3. **New work**: look for an existing ticket first (`relay find WORDS`). If there's none:
 
    ```bash
@@ -108,6 +110,7 @@ Then tell Adam the kickoff for the next session: **`Continue KEY.`** (the phase'
 | `relay project list`, `relay project create KEY --name N [--kind app\|jira] [--path DIR]…`, `relay project path KEY DIR [--remove]` | Projects (create and change only when Adam asks) |
 | `relay move PROJECT`, `relay jira URL\|KEY`, `relay jira --remove` | File the ticket into a project or link it to a Jira issue (only when Adam asks). Several tickets may share one Jira issue |
 | `relay link NAME [URL]`, `relay doc PATH [--label L]` | Links (empty URL removes one) and reference docs |
+| `relay attachment [KEY] [NAME\|N…] [--list] [--out DIR]` | Download the ticket's attachments (all, or by name, part of a name or number) to `<temp>/relay-attachments/KEY/` and print the paths to read. Claude can't upload or delete them |
 | `relay file PATH… [--kind shell]` | Log files changed outside Write/Edit and outside git |
 | `relay notes` | Adam's unseen notes on the attached tickets (marks them seen) |
 | `relay sweep`, `relay flush` | Log git-changed files now; send the local queue |

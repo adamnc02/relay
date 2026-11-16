@@ -26,6 +26,26 @@ const JIRA_PROJECTS = [['RP', 'RP', '#64748B', 'https://example.atlassian.net/br
 // The rail's groups, as the migration seeds them.
 const GROUPS = [['Jira', 10, 'jira'], ['Apps', 20, 'app']];
 
+const SHOT = `<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+<rect width="390" height="844" fill="#F6F7F9"/><rect width="390" height="96" fill="#FFFFFF"/>
+<text x="24" y="70" font-family="-apple-system,Helvetica,Arial" font-size="30" font-weight="700" fill="#14171F">Lists</text>
+<rect x="24" y="130" width="342" height="64" rx="14" fill="#FFFFFF"/><text x="44" y="169" font-family="-apple-system,Helvetica,Arial" font-size="17" fill="#14171F">Weekly shop</text>
+<rect x="24" y="210" width="342" height="64" rx="14" fill="#FFFFFF"/><text x="44" y="249" font-family="-apple-system,Helvetica,Arial" font-size="17" fill="#14171F">Hardware</text>
+<rect x="24" y="300" width="342" height="120" rx="14" fill="#FFF4E5" stroke="#F3B35C" stroke-dasharray="6 5"/>
+<text x="195" y="352" text-anchor="middle" font-family="-apple-system,Helvetica,Arial" font-size="16" fill="#8A5A12">The shared list should be here</text>
+<text x="195" y="380" text-anchor="middle" font-family="-apple-system,Helvetica,Arial" font-size="14" fill="#8A5A12">Invite accepted 09:41, nothing shown</text></svg>`;
+const LOG = `09:41:02 invite: opened /join?code=K7Q2
+09:41:02 auth: no session yet, waiting
+09:41:03 auth: signed in
+09:41:03 lists: loaded 2 lists
+09:41:03 invite: join skipped (ran before sign-in finished)
+`;
+// [ticket, file name, type, contents, hoursAgo]
+const SAMPLE_FILES = [
+  ['LST-7', 'invite-second-phone.svg', 'image/svg+xml', SHOT, 1.5],
+  ['LST-7', 'console-log.txt', 'text/plain', LOG, 1.4],
+];
+
 // [auto_key, status, title, hoursAgo, extra]
 const TICKETS = [
   ['RLY-1', 'backlog', 'Build Relay', 0.1, {}],
@@ -219,5 +239,16 @@ export function buildSample(now = Date.now()) {
   for (const [k, list] of Object.entries(DOCS)) {
     for (const [path, label] of list) ticket_docs.push({ ticket_id: byKey[k].id, path, label, added_at: iso(10) });
   }
-  return { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs, nextEventId: eid };
+  // Sample attachments on LST-7: a drawn "screenshot" and a console log. The
+  // demo adapter turns sampleFiles into blob URLs when they are first shown.
+  const attachments = [];
+  const sampleFiles = {};
+  for (const [k, name, type, body, hAgo] of SAMPLE_FILES) {
+    const t = byKey[k];
+    const id = uuid();
+    attachments.push({ id, ticket_id: t.id, path: `${t.id}/${uuid()}/${name}`, name, mime: type, size_bytes: new Blob([body]).size,
+      created_by: 'adam', created_at: iso(hAgo), updated_at: iso(hAgo) });
+    sampleFiles[id] = { type, body };
+  }
+  return { project_groups, projects, tickets, events, sessions, ticket_files, ticket_docs, attachments, sampleFiles, nextEventId: eid };
 }

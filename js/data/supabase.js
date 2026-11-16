@@ -4,8 +4,14 @@
 // seq, auto_key or display_key.
 
 import { SUPABASE_URL, SUPABASE_ANON_KEY, SCHEMA, redirectTo, SUPABASE_JS_VERSION } from '../config.js';
+import { uuid } from '../model.js';
 
-const TABLES = ['project_groups', 'projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs'];
+const TABLES = ['project_groups', 'projects', 'tickets', 'events', 'sessions', 'ticket_files', 'ticket_docs', 'attachments'];
+// Files attached to tickets: a private bucket, 50 MB per file, any type
+// (silver-octo-invention 20261116130000_relay_attachments).
+const BUCKET = 'relay-attachments';
+export const ATTACH_MAX_BYTES = 52428800;
+const URL_SECONDS = 600;
 const ATTEMPT_KEY = 'relay:auth:attempt';
 const PAGE = 1000;
 
@@ -18,6 +24,18 @@ function loadScript(src) {
     s.onerror = () => reject(new Error('Could not load ' + src));
     document.head.appendChild(s);
   });
+}
+
+// An object name keeps the file's own name where Storage allows it; the row
+// keeps the name exactly as it was.
+function safeName(name) {
+  const n = String(name || 'file').normalize('NFC').replace(/[^\w.\-() ]+/g, '_').replace(/^[.\s]+/, '').slice(-120);
+  return n || 'file';
+}
+function storageError(err) {
+  const e = new Error(/exceeded the maximum allowed size|too large|413/i.test(err?.message || '') ? 'That file is over 50 MB.' : err?.message || 'Storage refused the file.');
+  e.code = err?.statusCode || 'storage';
+  return e;
 }
 
 export function isNetworkError(err) {
@@ -150,7 +168,11 @@ export function createSupabaseAdapter() {
     },
 
     async loadAll() {
-      const res = await Promise.all(TABLES.map(fetchAll));
+      // attachments is optional: a board whose database predates the table
+      // still loads, with no attachments.
+      const res = await Promise.all(TABLES.map((t) => (t === 'attachments'
+        ? fetchAll(t).catch((e) => { if (['PGRST205', '42P01'].includes(e?.code)) return []; throw e; })
+        : fetchAll(t))));
       return Object.fromEntries(TABLES.map((t, i) => [t, res[i]]));
     },
 
@@ -214,6 +236,51 @@ export function createSupabaseAdapter() {
       const changes = one('tickets', 'UPDATE')(await client.from('tickets').update(clean).eq('id', id).select().single());
       const t = changes[0].row;
       return changes.concat(await refetch([t.id, t.parent_id, ctx.prevParentId]));
+    },
+
+    // Attachments: the object goes up first, then its row; a row that can't be
+    // written takes its object back out, so the bucket holds no file without a
+    // row. Removing goes the other way round: object, then row. Nothing in SQL
+    // can delete an object (MIGRATION-LESSONS §70).
+    async uploadAttachment(ticketId, file) {
+      // A lapsed session would send the publishable key and be refused as anon
+      // (MIGRATION-LESSONS §77): say so instead.
+      const { data: s } = await client.auth.getSession();
+      if (!s?.session) { const e = new Error("You're signed out. Sign in again, then upload."); e.code = 'signed-out'; throw e; }
+      const path = `${ticketId}/${uuid()}/${safeName(file.name)}`;
+      const up = await client.storage.from(BUCKET).upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+      if (up.error) throw storageError(up.error);
+      const ins = await client.from('attachments').insert({
+        ticket_id: ticketId, path, name: file.name || 'file', mime: file.type || null, size_bytes: file.size,
+      }).select().single();
+      if (ins.error) {
+        await client.storage.from(BUCKET).remove([path]).catch(() => {});
+        throw ins.error;
+      }
+      return [{ table: 'attachments', type: 'INSERT', row: ins.data }];
+    },
+
+    async deleteAttachment(row) {
+      const rm = await client.storage.from(BUCKET).remove([row.path]);
+      if (rm.error) throw storageError(rm.error);
+      const { error } = await client.from('attachments').delete().eq('id', row.id);
+      if (error) throw error;
+      return [{ table: 'attachments', type: 'DELETE', row: null, old: { id: row.id } }];
+    },
+
+    // Signed URLs for viewing (inline) or saving (download: the file's own name).
+    async attachmentUrls(rows, { download = false } = {}) {
+      if (!rows.length) return {};
+      if (download) {
+        const r = await client.storage.from(BUCKET).createSignedUrl(rows[0].path, URL_SECONDS, { download: rows[0].name });
+        if (r.error) throw storageError(r.error);
+        return { [rows[0].id]: r.data.signedUrl };
+      }
+      const r = await client.storage.from(BUCKET).createSignedUrls(rows.map((x) => x.path), URL_SECONDS);
+      if (r.error) throw storageError(r.error);
+      const out = {};
+      r.data.forEach((d, i) => { if (d.signedUrl) out[rows[i].id] = d.signedUrl; });
+      return out;
     },
 
     async insertEvent(f) {
