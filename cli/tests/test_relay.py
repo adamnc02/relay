@@ -751,6 +751,16 @@ class Rly20(unittest.TestCase):
         self.assertIn(":'type'", relay.SQL_CREATE)
         self.assertIn("'summary_plain', t.summary_plain", relay.SQL_GET)
 
+    def test_get_prints_the_description_above_the_brief(self):
+        d = {"ticket": {"key": "RLY-22", "title": "Description", "status": "progress", "project": "RLY",
+                        "project_name": "Relay", "brief": "## Goal\nClaude's words", "description": "  Adam's words  "}}
+        out = relay.format_get(d)
+        self.assertIn("'description', t.description", relay.SQL_GET)
+        self.assertIn("## Description (Adam's own words; read it, never write it)\nAdam's words\n", out)
+        self.assertLess(out.index("Adam's words"), out.index("Claude's words"))
+        d["ticket"]["description"] = None
+        self.assertNotIn("## Description", relay.format_get(d))
+
 
 class PsqlVariables(unittest.TestCase):
     """Values reach psql as \\set lines on stdin, never argv (RLY-18: on Windows

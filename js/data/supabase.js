@@ -200,7 +200,7 @@ export function createSupabaseAdapter() {
 
     async insertTicket(f) {
       const row = { project_id: f.project_id, title: f.title, updated_by: 'adam' };
-      for (const k of ['status', 'need', 'brief', 'parent_id', 'phase', 'jira_key', 'jira_url', 'type']) if (f[k] != null) row[k] = f[k];
+      for (const k of ['status', 'need', 'brief', 'parent_id', 'phase', 'jira_key', 'jira_url', 'type', 'description']) if (f[k] != null) row[k] = f[k];
       const changes = one('tickets', 'INSERT')(await client.from('tickets').insert(row).select().single());
       const t = changes[0].row;
       const p = await client.from('projects').select('*').eq('id', t.project_id).single();

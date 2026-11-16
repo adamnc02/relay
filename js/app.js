@@ -33,6 +33,7 @@ const st = {
   railFold: {},
   rail: false, // collapsed to the 64px icon rail (desktop only)
   tab: 'brief', // the ticket panel's tab
+  descDraft: null, // { id, value } while a ticket's description is being edited
   theme: 'system',
   version: '',
   order: [], // the current view's tickets, in screen order, for Previous / Next
@@ -916,6 +917,51 @@ async function toggleArchive(t) {
     return ch.concat(await note(t, 'archive', arch ? 'Archived.' : 'Unarchived.'));
   }, arch ? 'Archived. It is in the Archived view.' : 'Unarchived');
 }
+// The description is the owner's own words; the brief is Claude's. While it is
+// being edited the draft lives in st.descDraft, so a live update that
+// re-renders the panel keeps the text being typed.
+function descSection(x) {
+  const editing = st.descDraft?.id === x.id;
+  const text = (x.description || '').trim();
+  if (editing) {
+    return `<section class="desc editing" aria-labelledby="d-desc-l"><div class="desc-l" id="d-desc-l">Description</div>
+      <textarea id="d-desc-in" aria-labelledby="d-desc-l" placeholder="What you want, in your own words">${esc(st.descDraft.value)}</textarea>
+      <div class="desc-acts"><button class="btn ghost" id="d-desc-cancel">Cancel</button><button class="btn primary" id="d-desc-save">Save</button></div></section>`;
+  }
+  if (!text) {
+    return st.readOnly ? '' : `<section class="desc empty" aria-label="Description"><button class="desc-add" id="d-desc-edit">${I_PENCIL}Add a description</button></section>`;
+  }
+  return `<section class="desc" aria-labelledby="d-desc-l"><div class="desc-l" id="d-desc-l">Description${st.readOnly ? '' : `<button class="ib sm" id="d-desc-edit" aria-label="Edit description" title="Edit">${I_PENCIL}</button>`}</div><div class="mdl desc-b">${renderMarkdown(text)}</div></section>`;
+}
+function wireDesc(x) {
+  const grow = (ta) => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, 420) + 'px'; };
+  const edit = $('d-desc-edit');
+  if (edit) edit.onclick = () => {
+    st.descDraft = { id: x.id, value: x.description || '' };
+    renderDrawer();
+    const ta = $('d-desc-in');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  };
+  const ta = $('d-desc-in');
+  if (!ta) return;
+  grow(ta);
+  const cancel = () => { st.descDraft = null; renderDrawer(); $('d-desc-edit')?.focus({ preventScroll: true }); };
+  const save = async () => {
+    const v = ta.value.trim();
+    st.descDraft = null;
+    if (v === (x.description || '').trim()) { renderDrawer(); return; }
+    const ch = await run(() => adapter.updateTicket(x.id, { description: v || null }), v ? 'Description saved' : 'Description removed');
+    if (!ch) st.descDraft = { id: x.id, value: ta.value };
+    renderDrawer();
+  };
+  ta.oninput = () => { st.descDraft.value = ta.value; grow(ta); };
+  ta.onkeydown = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); cancel(); }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
+  };
+  $('d-desc-cancel').onclick = cancel;
+  $('d-desc-save').onclick = save;
+}
 async function rename(t, title) {
   if (!title || title === t.title) { render(); return; }
   await run(() => adapter.updateTicket(t.id, { title }), 'Renamed');
@@ -1062,12 +1108,14 @@ async function newTicket(status = null) {
     title: status ? `New ticket in ${SBY[status].name}` : 'New ticket', ok: 'Create',
     fields: [
       { id: 'title', label: 'Title', placeholder: 'What needs doing?', required: true },
+      { id: 'description', label: 'Description', type: 'textarea', placeholder: 'What you want, in your own words (optional)' },
       { id: 'project', label: 'Project', type: 'select', value: def.id, options: D.projects.map((p) => ({ value: p.id, label: projLabel(p) })) },
       { id: 'type', label: 'Type', type: 'seg', value: 'dev', options: [{ value: 'dev', label: 'Dev', icon: I_CODE }, { value: 'bug', label: 'Bug', icon: I_BUG }] },
     ],
   });
   if (!v) return;
   const f = { project_id: v.project, title: v.title, type: v.type === 'bug' ? 'bug' : 'dev' };
+  if (v.description) f.description = v.description;
   if (status) f.status = status;
   const ch = await run(() => adapter.insertTicket(f), (c) => 'Created ' + c.find((x) => x.table === 'tickets' && x.type === 'INSERT').row.auto_key);
   if (ch) openTicket(ch.find((x) => x.table === 'tickets' && x.type === 'INSERT').row.id);
@@ -1176,6 +1224,7 @@ function renderDrawer(fresh = false) {
     <h2 id="dtitle" class="dtitle" ${st.readOnly ? '' : 'tabindex="0" title="Rename"'}>${x.type === 'bug' ? bugMark() : ''}${esc(x.title)}</h2>
     ${x.needs_wrapup ? '<div><span class="flag">Closed without wrap-up</span></div>' : ''}
     ${x.status === 'waiting' ? `<section class="wbox"><div style="flex:1;min-width:0"><div class="l">${sicon('waiting', 14)}What I need from you</div><p>${esc(x.need)}</p></div><div class="acts">${wk ? `<button class="btn ink" data-goto="${wk.id}">Open ${esc(disp(wk))}</button>` : `<button class="btn ink" id="d-did" ${ro}>I've done this</button><button class="btn chg" id="d-need" ${ro}>Change</button>`}</div></section>` : ''}
+    ${descSection(x)}
     <div class="props">
       <dl>
         <div class="prop"><dt>Status</dt><dd>${isP ? `${sicon(x.status)}<span>${SBY[x.status].name}</span> <span class="sub">· set by its phases</span>` : `<button class="pbtn" id="d-status" ${ro} aria-haspopup="menu">${sicon(x.status)}<span>${SBY[x.status].name}</span><span class="car">${I_CARET}</span></button>`}</dd></div>
@@ -1260,6 +1309,7 @@ function renderDrawer(fresh = false) {
     h2.onclick = edit;
     h2.onkeydown = (e) => { if (e.key === 'Enter') edit(); };
   }
+  wireDesc(x);
 
   if (keep) {
     if (keep.note && $('d-note')) $('d-note').value = keep.note;

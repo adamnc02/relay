@@ -36,7 +36,7 @@ The UI talks to one adapter object. Both adapters implement:
 
 Every write resolves to a list of changes `{ table, type, row, old? }`, which the store applies by primary key. Realtime delivers the same shape, so a change that arrives twice (once from the write's response, once from Realtime) lands once.
 
-Rows keep their database shape everywhere: the UI reads `auto_key`, `display_key`, `parent_id`, `phase`, `need`, `brief`, `links`, `type`, `summary_plain`, `group_id`, `archived_at`, `done_at` and so on directly.
+Rows keep their database shape everywhere: the UI reads `auto_key`, `display_key`, `parent_id`, `phase`, `need`, `description`, `brief`, `links`, `type`, `summary_plain`, `group_id`, `archived_at`, `done_at` and so on directly.
 
 ### What the database owns
 
@@ -130,6 +130,8 @@ Every key is read and written inside try/catch; the app renders the same without
 - **Session live** on a board card: one of the ticket's sessions has no `ended_at` and started under 12 hours ago. A session that ended without its end hook never gets an `ended_at`, so the 12 hours keep a crashed session from showing as live for ever.
 
 ## Ticket type, Draft update, Projects and groups
+
+- **Description.** `tickets.description` is the owner's own words on what the ticket is for; the brief is Claude's, replaced whole by `relay brief`, so the two never share a field. The database refuses `claude_relay` setting or changing it (`tickets_b_description_rule`, 23514). The panel renders it with `renderMarkdown()` in its own section (`descSection()`) after the title and the waiting box and before the properties, so it shows whatever tab is open. The New ticket dialog's optional Description is sent only when not empty; saving an empty description writes `null`. While it is being edited the draft is held in `st.descDraft` (`{ id, value }`), so a live update that re-renders the panel keeps the text being typed; opening another ticket drops the draft. `relay get` prints it above the new notes and the brief.
 
 - **Type.** `tickets.type` is `dev` or `bug`. A bug shows a 13px bug icon (`role="img"`, `aria-label="Bug"`) before its title in rows, cards, search and the panel; dev shows nothing. The panel's Type picker and the New ticket dialog's Dev / Bug choice write it. A phase has its own type.
 - **Draft update** fills two templates from `tickets.summary_plain`, the plain-English summary Claude sessions write with `relay summary` (and at `/close`), plus one line chosen by the ticket's status (`NEXT_LINE` in `js/app.js`). The need is not quoted: it is written for the owner, not for a reader outside the work. Email: an `Update: <title>` subject, "Hi [NAME],", the summary, "What happens next: …", a closing line and "Thanks, Adam". Teams: the title, the summary and the status line, with no greeting or sign-off. Edits in each tab are kept while the dialog is open; nothing is saved or sent. With no summary, the dialog names `relay summary KEY` and Copy is disabled.

@@ -295,6 +295,18 @@ a:hover{color:var(--accent-h)}
 .wbox .acts{display:flex;flex-direction:column;gap:6px;flex:none}
 .wbox .acts .btn{padding:8px 14px;border-radius:9px}
 .wbox .acts .chg{background:none;color:var(--wait-change);font-weight:400}
+.desc{background:var(--sunk-2);border-radius:14px;padding:12px 16px 14px}
+.desc-l{display:flex;align-items:center;justify-content:space-between;min-height:24px;font-size:12.5px;font-weight:600;color:var(--muted);margin-bottom:2px}
+.desc-l .ib.sm{width:28px;height:28px;margin-right:-8px}
+.desc-b{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.desc-b > :first-child{margin-top:0}
+.desc-b > :last-child{margin-bottom:0}
+.desc.empty{background:none;padding:0}
+.desc-add{display:flex;align-items:center;gap:8px;width:100%;border:1px dashed var(--line-2);border-radius:12px;background:none;padding:10px 14px;font:inherit;font-size:13.5px;color:var(--muted);cursor:pointer;text-align:left}
+.desc-add:hover{background:var(--hover);color:var(--fg)}
+.desc textarea{display:block;width:100%;min-height:96px;resize:vertical;font:inherit;font-size:14px;line-height:1.5;color:var(--fg);background:var(--surface);border:1px solid var(--line-2);border-radius:10px;padding:10px 12px;outline:none}
+.desc textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent)}
+.desc-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
 .props{display:grid;grid-template-columns:1fr 1fr;gap:0 24px}
 .props dl{margin:0;min-width:0}
 .prop{display:grid;grid-template-columns:92px minmax(0,1fr);align-items:center;min-height:34px;font-size:13.5px}
@@ -489,6 +501,9 @@ a:hover{color:var(--accent-h)}
 @media (max-width:760px){
   /* iOS zooms into any field under 16px when it takes focus. */
   input,textarea,select{font-size:16px!important}
+  .desc-acts .btn{min-height:44px;padding:0 18px}
+  .desc-l .ib.sm{width:44px;height:44px;margin:-10px -14px -10px 0}
+  .desc-add{min-height:44px}
   /* The page itself scrolls on a phone, not an inner panel, so iOS treats it as a normal scrolling
      page: its blur under the status bar only appears once content moves beneath it. */
   .app{display:block;height:auto;min-height:100vh;min-height:100dvh;padding:0}

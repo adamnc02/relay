@@ -861,7 +861,7 @@ select json_build_object(
   'ticket', (select json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
                'jira_key', t.jira_key, 'jira_url', t.jira_url, 'aliases', t.aliases, 'title', t.title,
                'status', t.status, 'priority', t.priority, 'need', t.need, 'brief', t.brief,
-               'type', t.type, 'summary_plain', t.summary_plain,
+               'type', t.type, 'summary_plain', t.summary_plain, 'description', t.description,
                'next_step', t.next_step, 'phase', t.phase, 'links', t.links, 'updated_by', t.updated_by,
                'needs_wrapup', t.needs_wrapup, 'session_ids', t.session_ids,
                'archived', to_char(t.archived_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
@@ -1471,6 +1471,10 @@ def format_get(d, all_sessions=False):
     links = t.get("links") or {}
     if links:
         out.append("Links: " + " · ".join("%s %s" % (k, v) for k, v in sorted(links.items())))
+    if (t.get("description") or "").strip():
+        out.append("")
+        out.append("## Description (Adam's own words; read it, never write it)")
+        out.append(t["description"].strip())
     notes = d.get("new_notes") or []
     if notes:
         out.append("")
