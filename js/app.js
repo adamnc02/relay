@@ -1555,9 +1555,10 @@ function moreMenu(anchor, x) {
 
 /* ---------- draft update ---------- */
 
-// Relay calls no AI, so the words come from the ticket's plain-English summary,
-// which Claude sessions keep up to date (`relay summary`, /close). The status
-// adds a plain line on what happens next. Nothing is saved or sent.
+// Relay calls no AI, so the words come from the ticket's two summaries, which
+// Claude sessions keep up to date in Adam's voice: summary_plain (Non-technical,
+// `relay summary`) and summary_tech (Technical, `relay summary --tech`). The
+// status adds a plain line on what happens next. Nothing is saved or sent.
 const NEXT_LINE = {
   backlog: "It's on the list, but work on it hasn't started yet.",
   next: "It's next in line, and work on it starts soon.",
@@ -1566,8 +1567,12 @@ const NEXT_LINE = {
   testing: "It's being tested now, and it goes live once that passes.",
   done: 'This is now finished.',
 };
-function draftText(t, kind) {
-  const sum = String(t.summary_plain || '').trim();
+const DRAFT_AUD = {
+  plain: { label: 'Non-technical', field: 'summary_plain', cmd: 'relay summary', hint: 'Plain English, no technical detail' },
+  tech: { label: 'Technical', field: 'summary_tech', cmd: 'relay summary --tech', hint: 'Names systems, tables and fields' },
+};
+function draftText(t, kind, aud = 'plain') {
+  const sum = String(t[DRAFT_AUD[aud].field] || '').trim();
   const next = NEXT_LINE[t.status] || '';
   if (kind === 'teams') return `${t.title}: ${sum}\n\n${next}`;
   const closing = t.status === 'done' ? "Let me know if you notice anything else." : "I'll let you know as soon as it's done.";
@@ -1577,31 +1582,37 @@ function openDraft(t) {
   closePop();
   const host = $('modalhost');
   const back = document.activeElement;
-  const has = !!String(t.summary_plain || '').trim();
+  const hasAud = (a) => !!String(t[DRAFT_AUD[a].field] || '').trim();
   let kind = 'email';
-  const text = { email: draftText(t, 'email'), teams: draftText(t, 'teams') };
+  let aud = 'plain';
+  const text = {};
+  for (const a of Object.keys(DRAFT_AUD)) for (const k of ['email', 'teams']) text[`${a}:${k}`] = draftText(t, k, a);
   let subject = `Update: ${t.title}`;
   const close = () => { host.innerHTML = ''; back?.focus?.({ preventScroll: true }); };
   const draw = () => {
+    const has = hasAud(aud);
+    const A = DRAFT_AUD[aud];
     host.innerHTML = `<div class="scrim" data-cancel style="z-index:40"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dr-h">
       <div class="dlg-h"><div><h2 id="dr-h">Draft an update</h2><div class="sub"><span class="mono">${esc(disp(t))}</span> · ${esc(t.title)}</div></div><button class="ib x" data-cancel aria-label="Close">${I_CLOSE}</button></div>
       <div class="dlg-b">
-        <div class="dtabs"><div class="seg" role="group" aria-label="Format"><button aria-pressed="${kind === 'email'}" data-kind="email">${I_MAIL}Email</button><button aria-pressed="${kind === 'teams'}" data-kind="teams">${I_CHAT}Teams message</button></div><span class="hint">Plain English, no technical detail</span></div>
+        <div class="dtabs"><div class="seg" role="group" aria-label="Format"><button aria-pressed="${kind === 'email'}" data-kind="email">${I_MAIL}Email</button><button aria-pressed="${kind === 'teams'}" data-kind="teams">${I_CHAT}Teams message</button></div>
+          <div class="seg" role="group" aria-label="Reader">${Object.entries(DRAFT_AUD).map(([a, d]) => `<button aria-pressed="${aud === a}" data-aud="${a}">${d.label}</button>`).join('')}</div><span class="hint">${A.hint}</span></div>
         ${has ? `${kind === 'email' ? `<div class="field"><label class="lbl" for="dr-subj">Subject</label><div class="subj"><input id="dr-subj" value="${esc(subject)}"><button class="btn" id="dr-subj-copy">${I_COPY}Copy</button></div></div>` : ''}
-        <div class="field"><label class="lbl" for="dr-msg">Message</label><textarea id="dr-msg">${esc(text[kind])}</textarea></div>
-        <p class="note">Written from the ticket's plain-English summary, which Claude keeps up to date at each <code>/close</code>. Edit freely before copying; nothing is saved or sent.</p>`
-        : `<div class="nosum">No plain-English summary yet. Ask Claude to run <code>relay summary ${esc(t.auto_key)}</code> or <code>/close</code> on this ticket.</div>`}
+        <div class="field"><label class="lbl" for="dr-msg">Message</label><textarea id="dr-msg">${esc(text[`${aud}:${kind}`])}</textarea></div>
+        <p class="note">Written from the ticket's ${aud === 'tech' ? 'technical' : 'plain-English'} summary, which Claude keeps up to date in your voice at each <code>/close</code>. Edit freely before copying; nothing is saved or sent.</p>`
+        : `<div class="nosum">No ${aud === 'tech' ? 'technical' : 'plain-English'} summary yet. Ask Claude to run <code>${A.cmd} --key ${esc(t.auto_key)}</code> or <code>/close</code> on this ticket.</div>`}
       </div>
       <div class="dlg-f"><span class="spacer"></span><button class="btn ghost" data-cancel>Cancel</button><button class="btn primary" id="dr-copy" ${has ? '' : 'disabled'}>${I_COPY}Copy message</button></div>
     </div>`;
     host.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = close));
     host.querySelector('.dlg').addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
     host.querySelectorAll('[data-kind]').forEach((b) => (b.onclick = () => { keepEdits(); kind = b.dataset.kind; draw(); host.querySelector(`[data-kind="${kind}"]`).focus(); }));
+    host.querySelectorAll('[data-aud]').forEach((b) => (b.onclick = () => { keepEdits(); aud = b.dataset.aud; draw(); host.querySelector(`[data-aud="${aud}"]`).focus(); }));
     if ($('dr-subj-copy')) $('dr-subj-copy').onclick = () => copy($('dr-subj').value, 'Subject copied');
-    $('dr-copy').onclick = () => { keepEdits(); copy(text[kind], kind === 'email' ? 'Email copied' : 'Teams message copied'); };
+    $('dr-copy').onclick = () => { keepEdits(); copy(text[`${aud}:${kind}`], kind === 'email' ? 'Email copied' : 'Teams message copied'); };
   };
   const keepEdits = () => {
-    if ($('dr-msg')) text[kind] = $('dr-msg').value;
+    if ($('dr-msg')) text[`${aud}:${kind}`] = $('dr-msg').value;
     if ($('dr-subj')) subject = $('dr-subj').value;
   };
   draw();

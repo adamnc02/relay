@@ -192,7 +192,7 @@ database), or a parent ticket's `status`/`need` (rolled up from its children by 
 | `attach KEY` | Records session → ticket locally, appends the session ID to `tickets.session_ids`, inserts the `sessions` row, clears `needs_wrapup`, snapshots the ticket's project repos, and flushes the queue |
 | `brief [--key K] [--next-step S]` | Replaces the brief with stdin |
 | `type dev\|bug [--key K]` | Sets the ticket's type (`tickets.type`). The app marks a bug with a bug icon |
-| `summary TEXT…\|- [--key K]` | Replaces `tickets.summary_plain`: two to four plain-English sentences (the issue, what's been done, what happens next) that the app's Draft update turns into an email or Teams message. Refuses empty text |
+| `summary TEXT…\|- [--tech] [--key K]` | Replaces `tickets.summary_plain`: two to four plain-English sentences (the issue, what's been done, what happens next) that the app's Draft update turns into a Non-technical email or Teams message. With `--tech`, replaces `tickets.summary_tech` instead: two to five sentences for a technical reader (the issue, the cause, what changed, what's next) behind the Technical drafts. Both are written in Adam's voice ("I", "we"), never about him. Refuses empty text |
 | `session [--key K] --summary S [--open-items O] [--commit SHA]… [--pr URL]…` | Upserts this session's row: the summary is appended, open items replaced, commits and PRs merged |
 | `note TEXT…\|-` | Inserts an `events` note with actor `claude:<session-id>` |
 | `status S [--need N] [--next-step S]`, `wait NEED…`, `later [--next-step S]`, `done` | Sets the status. Leaving `waiting` clears `need` |

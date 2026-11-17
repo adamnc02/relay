@@ -36,7 +36,7 @@ else:
 # Windows: child processes (psql, git) get no console window of their own.
 NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 CONNINFO_DEFAULT = ("host=aws-0-eu-central-1.pooler.supabase.com port=5432 dbname=postgres "
                     "user=claude_relay.nxekrfdagkdwhjuunsrl sslmode=require")
@@ -869,7 +869,7 @@ select json_build_object(
   'ticket', (select json_build_object('id', t.id, 'key', t.display_key, 'auto_key', t.auto_key,
                'jira_key', t.jira_key, 'jira_url', t.jira_url, 'aliases', t.aliases, 'title', t.title,
                'status', t.status, 'priority', t.priority, 'need', t.need, 'brief', t.brief,
-               'type', t.type, 'summary_plain', t.summary_plain, 'description', t.description,
+               'type', t.type, 'summary_plain', t.summary_plain, 'summary_tech', t.summary_tech, 'description', t.description,
                'next_step', t.next_step, 'phase', t.phase, 'links', t.links, 'updated_by', t.updated_by,
                'needs_wrapup', t.needs_wrapup, 'session_ids', t.session_ids,
                'archived', to_char(t.archived_at at time zone :'tz', 'YYYY-MM-DD HH24:MI'),
@@ -1077,11 +1077,18 @@ update relay.tickets set type = :'type', updated_by = :'by'
 returning json_build_object('key', display_key, 'type', type)
 """
 
-# The plain-English summary the app's Draft update fills its email and Teams templates from.
+# The two summaries the app's Draft update fills its email and Teams templates from:
+# summary_plain (Non-technical) and summary_tech (Technical).
 SQL_SUMMARY = """
 update relay.tickets set summary_plain = :'text', updated_by = :'by'
  where id = :'tid'::uuid
 returning json_build_object('key', display_key, 'length', length(summary_plain))
+"""
+
+SQL_SUMMARY_TECH = """
+update relay.tickets set summary_tech = :'text', updated_by = :'by'
+ where id = :'tid'::uuid
+returning json_build_object('key', display_key, 'length', length(summary_tech))
 """
 
 SQL_BRIEF = """
@@ -1475,6 +1482,7 @@ def format_get(d, all_sessions=False):
     if t.get("next_step"):
         out.append("Next step: " + t["next_step"])
     out.append("Plain summary: " + (t.get("summary_plain") or "(none yet: write one with relay summary)"))
+    out.append("Technical summary: " + (t.get("summary_tech") or "(none yet: write one with relay summary --tech)"))
     if t.get("needs_wrapup"):
         out.append("FLAG: closed without wrap-up. Ask Adam whether to mark it done or carry on.")
     if t.get("archived"):
@@ -1807,11 +1815,11 @@ def cmd_summary(args):
     t = target(args, sid)
     text = read_text_arg(" ".join(args.text), "summary").strip()
     if not text:
-        raise RelayError("summary: give two to four plain-English sentences (- reads stdin)")
+        raise RelayError("summary: give two to four sentences, written as Adam (- reads stdin)")
     v = common_vars(sid)
     v.update({"tid": t["id"], "text": text})
-    r = q(SQL_SUMMARY, v)
-    print("Plain summary of %s updated (%d characters)." % (r["key"], r["length"]))
+    r = q(SQL_SUMMARY_TECH if args.tech else SQL_SUMMARY, v)
+    print("%s summary of %s updated (%d characters)." % ("Technical" if args.tech else "Plain", r["key"], r["length"]))
 
 
 def cmd_session(args):
@@ -2928,8 +2936,9 @@ def build_parser():
     sp = add("type", cmd_type, "Set the ticket's type: dev or bug.")
     sp.add_argument("type", choices=("dev", "bug"))
     sp.add_argument("--key")
-    sp = add("summary", cmd_summary, "Set the ticket's plain-English summary for Draft update (- reads stdin).")
+    sp = add("summary", cmd_summary, "Set the ticket's summary for Draft update, written as Adam: plain English, or --tech (- reads stdin).")
     sp.add_argument("text", nargs="+")
+    sp.add_argument("--tech", action="store_true", help="set the Technical summary instead of the plain-English one")
     sp.add_argument("--key")
     sp = add("brief", cmd_brief, "Replace the ticket's brief with stdin.")
     sp.add_argument("--key")

@@ -152,7 +152,7 @@ export function createDemoAdapter() {
       const auto = `${p.key}-${p.kind === 'jira' ? 'R' : ''}${seq}`;
       const t = {
         id: uuid(), project_id: p.id, seq, auto_key: auto, jira_key: f.jira_key || null, jira_url: f.jira_url || null,
-        type: f.type || 'dev', summary_plain: null, description: f.description || null,
+        type: f.type || 'dev', summary_plain: null, summary_tech: null, description: f.description || null,
         display_key: f.jira_key || auto, aliases: [], title: f.title, status: f.status || 'backlog', priority: 0,
         need: f.need || null, brief: f.brief || '', next_step: null, parent_id: f.parent_id || null, phase: f.phase ?? null,
         links: {}, updated_by: f.updated_by || 'adam', session_ids: [], needs_wrapup: false, archived_at: null,

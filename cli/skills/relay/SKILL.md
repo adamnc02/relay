@@ -73,16 +73,26 @@ Waiting for Adam, and any ticket **closed without wrap-up** into your context.
 
 ## 3. At the end of every phase (the handoff)
 
-The end-of-phase handoff is four writes, then a status:
+The end-of-phase handoff is five writes, then a status:
 
 1. **Session entry**: what closed, with commits and PRs:
    `relay session --summary "…" --open-items "…" --commit <sha> --pr <url>`
 2. **Brief update**: the brief says where things stand now and what the next phase starts from.
 3. **Plain summary**: `relay summary "…"`, two to four sentences in plain English on the issue,
    what's been done and what happens next, for someone non-technical. No file names, branches,
-   PRs, commands or jargon. The app's **Draft update** turns it into an email or Teams message.
-   It replaces the last one, so write it as where things stand now.
-4. **Status**: `relay wait "the one-line need from Adam"` when something needs him (UAT, a
+   PRs, commands or jargon.
+4. **Technical summary**: `relay summary --tech "…"`, two to five sentences for a technical
+   reader (a developer, a client's IT or data team): the issue, the cause, what changed and what
+   happens next. It may name systems, reports, tables, fields and measures; still no local file
+   paths, branch names, PR links or Claude/session plumbing.
+
+   The app's **Draft update** turns each summary into an email or a Teams message that **Adam
+   sends under his own name**, so write both **as Adam, to the reader**: "I", "we" or "the
+   report", never "Adam", "he" or "Adam needs to". What Adam still has to do becomes his own
+   plan ("I'm reviewing the README next", "I'll confirm the codes with you"), and what the reader
+   has to do is asked of them directly ("could you confirm which codes are tour operators?").
+   Each replaces the last one, so write it as where things stand now.
+5. **Status**: `relay wait "the one-line need from Adam"` when something needs him (UAT, a
    dashboard step, a decision); `relay later --next-step "…"` when it's parked; `relay done`
    when finished. At the end of the session `/close`, `/close later` or `/close wait` does the
    session entry and the status in one step.
@@ -98,7 +108,7 @@ Then tell Adam the kickoff for the next session: **`Continue KEY.`** (the phase'
 | `relay get KEY [--all] [--peek]` | The handoff: brief, last 3 sessions (`--all`: every one), files by repo, docs, links, phases, the parent's plan, recent activity. Marks Adam's new notes seen unless `--peek` |
 | `relay create TITLE [--project K] [--parent K] [--phase N] [--status S] [--need N] [--brief TEXT\|-] [--next-step S] [--type dev\|bug] [--no-attach]` | New ticket; the database assigns the ID |
 | `relay type dev\|bug [--key K]` | Set the ticket's type |
-| `relay summary TEXT…\|- [--key K]` | Replace the plain-English summary the app's Draft update reads |
+| `relay summary TEXT…\|- [--tech] [--key K]` | Replace the plain-English (or, with `--tech`, the technical) summary the app's Draft update reads. Written as Adam, to the reader |
 | `relay attach KEY` | Attach this session to a ticket (the last one attached is the current one) |
 | `relay brief [--key K] [--next-step S]` | Replace the brief with stdin |
 | `relay session [--key K] --summary S [--open-items O] [--commit SHA]… [--pr URL]…` | Add to this session's entry |
