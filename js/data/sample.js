@@ -21,6 +21,13 @@ const PROJECTS = [
   ['SUP', 'Supabase', '#475569'],
   ['INB', 'Inbox', '#7A8794'],
 ];
+// Each app project's folders, as relay.projects.paths holds them (the repo, then its tracking folder).
+const PATHS = {
+  RLY: [GH + '/relay', TRK + '/relay'], BLC: [GH + '/bloc-app', TRK + '/bloc-app'], SFL: [GH + '/shared-finance-ledger', TRK + '/shared-finance-ledger'],
+  PLG: [GH + '/personal-ledger', TRK + '/personal-ledger'], PF: [GH + '/personal-f', TRK + '/personal-f'], LST: [GH + '/listly', TRK + '/listly'],
+  PCH: [GH + '/pinch', TRK + '/pinch'], DSK: [GH + '/data-sketch', TRK + '/data-sketch'], MDC: [GH + '/my-dream-clean', TRK + '/my-dream-clean'],
+  SUP: [GH + '/silver-octo-invention', TRK + '/Supabase Migration'],
+};
 // Jira projects: [key, name, colour, jira_base]. RP keeps its key as its name, as one created from a pasted link does.
 const JIRA_PROJECTS = [['RP', 'RP', '#64748B', 'https://example.atlassian.net/browse/']];
 // The rail's groups, as the migration seeds them.
@@ -177,7 +184,7 @@ export function buildSample(now = Date.now()) {
   const project_groups = GROUPS.map(([name, sort, default_kind]) => ({ id: uuid(), name, sort, default_kind, created_at: iso(500), updated_at: iso(500) }));
   const gby = Object.fromEntries(project_groups.map((g) => [g.default_kind, g.id]));
   const projects = PROJECTS.map(([key, name, colour], i) => ({
-    id: uuid(), key, name, colour, kind: 'app', jira_base: null, paths: [], next_seq: 1, archived: false, sort: i,
+    id: uuid(), key, name, colour, kind: 'app', jira_base: null, paths: PATHS[key] || [], next_seq: 1, archived: false, sort: i,
     group_id: key === 'INB' ? null : gby.app, created_at: iso(500), updated_at: iso(500),
   })).concat(JIRA_PROJECTS.map(([key, name, colour, jira_base], i) => ({
     id: uuid(), key, name, colour, kind: 'jira', jira_base, paths: [], next_seq: 1, archived: false, sort: i,
@@ -221,7 +228,10 @@ export function buildSample(now = Date.now()) {
     events.push({ id: eid++, ticket_id: t.id, at: t.updated_at, actor: 'claude:sample', kind: 'status', body: t.need ? 'Needs: ' + t.need : null, from_status: 'backlog', to_status: t.status, seen_at: null });
     const ss = SESSIONS[t.auto_key] ?? [[h, 'Worked on: ' + t.title + '.', t.next_step || '', t.status === 'done' ? 'close' : 'close-later']];
     ss.forEach(([sh, summary, open, by], i) => {
-      sessions.push({ id: uuid(), ticket_id: t.id, session_id: `sample-${t.auto_key}-${i}`, machine: 'Mac', cwd: null, started_at: iso(sh + 1), ended_at: by ? iso(sh) : null, summary, open_items: open || null, commits: [], prs: [], closed_by: by });
+      // App tickets ran in their repo on the Mac; the Jira project's ran on a Windows laptop.
+      const pk = t.auto_key.split('-')[0];
+      const [machine, cwd] = PATHS[pk] ? ['Mac', PATHS[pk][0]] : pk === 'INB' ? ['Mac', null] : ['Work laptop', 'C:\\Users\\demo\\Repos\\' + pk.toLowerCase()];
+      sessions.push({ id: uuid(), ticket_id: t.id, session_id: `sample-${t.auto_key}-${i}`, machine, cwd, started_at: iso(sh + 1), ended_at: by ? iso(sh) : null, summary, open_items: open || null, commits: [], prs: [], closed_by: by });
     });
   }
   const dsk = byKey['DSK-21'];
