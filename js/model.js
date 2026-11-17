@@ -131,3 +131,70 @@ export function uuid() {
   const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
+
+// ---- Open in Claude Code (claude-cli:// deep link, this device only) ----
+
+// The device's desktop OS, or null on a phone or tablet (no Claude Code CLI there).
+// iPadOS reports a Mac user agent, so a Mac with a touch screen counts as a tablet.
+export function clientOS(ua = '', touchPoints = 0) {
+  if (/iPhone|iPad|iPod|Android/i.test(ua)) return null;
+  if (/Windows/i.test(ua)) return 'windows';
+  if (/Macintosh|Mac OS X/i.test(ua)) return touchPoints > 1 ? null : 'mac';
+  if (/Linux|X11|CrOS/i.test(ua)) return 'linux';
+  return null;
+}
+
+// 'windows' for a drive or UNC path, 'posix' for an absolute Unix path, else null.
+export function pathKind(p) {
+  if (/^[A-Za-z]:[\\/]/.test(p || '') || /^\\\\/.test(p || '')) return 'windows';
+  if (/^\//.test(p || '')) return 'posix';
+  return null;
+}
+const osKind = (os) => (os === 'windows' ? 'windows' : 'posix');
+
+// Folders a session can start in but that make no sense to reopen: temp dirs and the
+// desktop app's scratch workspaces.
+const TRANSIENT = [
+  /^\/(private\/)?tmp(\/|$)/,
+  /^\/(private\/)?var\/folders\//,
+  /\/Library\/Application Support\/Claude\/scratch-workspaces\//,
+  /\\AppData\\Local\\Temp(\\|$)/i,
+];
+
+function normPath(p, kind) {
+  const s = String(p).replace(/[\\/]+$/, '');
+  return kind === 'windows' ? s.replace(/\//g, '\\').toLowerCase() : s;
+}
+
+// The folder to open a ticket in on a device of kind `os` ('mac', 'windows', 'linux').
+// `cwds` are the recorded session folders, best first; `projectPaths` are this project's
+// folders; `knownPaths` every project's. A session folder inside a known project path, or
+// inside a worktree (<repo>/.claude/worktrees/<name>, often deleted since), opens at that
+// root instead. Returns null when no folder fits this OS.
+export function launchFolder({ os, cwds = [], projectPaths = [], knownPaths = [] }) {
+  const kind = osKind(os);
+  const sep = kind === 'windows' ? '\\' : '/';
+  const known = knownPaths.filter((p) => pathKind(p) === kind)
+    .map((p) => ({ p: String(p).replace(/[\\/]+$/, ''), n: normPath(p, kind) }))
+    .sort((a, b) => b.n.length - a.n.length);
+  for (const raw of cwds) {
+    if (!raw || pathKind(raw) !== kind || TRANSIENT.some((re) => re.test(raw))) continue;
+    let c = String(raw).replace(/[\\/]+$/, '');
+    const wt = c.search(/[\\/]\.claude[\\/]worktrees([\\/]|$)/);
+    if (wt > 0) c = c.slice(0, wt);
+    const n = normPath(c, kind);
+    const root = known.find((k) => n === k.n || n.startsWith(k.n + (kind === 'windows' ? '\\' : sep)));
+    return root ? root.p : c;
+  }
+  const own = projectPaths.find((p) => pathKind(p) === kind);
+  return own ? String(own).replace(/[\\/]+$/, '') : null;
+}
+
+export const claudeLink = (folder, prompt) =>
+  `claude-cli://open?q=${encodeURIComponent(prompt)}&cwd=${encodeURIComponent(folder)}`;
+
+// A command to paste into a terminal: zsh/bash on a Mac or Linux, PowerShell on Windows.
+export function claudeCommand(folder, prompt, os) {
+  if (os === 'windows') return `cd '${folder.replace(/'/g, "''")}'; claude "${prompt}"`;
+  return `cd '${folder.replace(/'/g, `'\\''`)}' && claude "${prompt}"`;
+}

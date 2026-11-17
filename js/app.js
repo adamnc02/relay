@@ -1,12 +1,12 @@
 // Relay UI. Renders the store; every write goes through the adapter, whose
 // returned changes are applied to the store. The same code runs in ?demo and live.
 
-import { STATUSES, SBY, ORDER, TYPES, isHidden, isOpen, parseJira, ts, actorLabel, isAdam, CLOSED_BY, safeHref, PROJECT_KEY_RE, JIRA_KEY_RE, NEW_JIRA_COLOUR, jiraProjectKey, friendlyError, projLabel } from './model.js';
+import { STATUSES, SBY, ORDER, TYPES, isHidden, isOpen, parseJira, ts, actorLabel, isAdam, CLOSED_BY, safeHref, PROJECT_KEY_RE, JIRA_KEY_RE, NEW_JIRA_COLOUR, jiraProjectKey, friendlyError, projLabel, clientOS, pathKind, launchFolder, claudeLink, claudeCommand } from './model.js';
 import { esc, renderMarkdown } from './markdown.js';
 import {
   handoff, sicon, parentIcon, bugMark, I_ALL, I_ARCH, I_SKILLS, I_BELL, I_COLLAPSE, I_EXPAND, I_SEARCH, I_PLUS, I_COPY, I_LINK,
   I_UP, I_DOWN, I_CARET, CHEV, I_MORE, I_CLOSE, I_SEND, I_SUN, I_MOON, I_MONITOR, I_GRID, I_SIGNOUT, I_LISTV, I_BOARDV, I_MENU,
-  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE, I_CLIP, I_DL, I_UPLOAD, I_FILE, I_CLIPBOARD,
+  I_MAIL, I_CHAT, I_GRIP, I_PENCIL, I_TRASH, I_CODE, I_BUG, I_GOOGLE, I_CLIP, I_DL, I_UPLOAD, I_FILE, I_CLIPBOARD, I_TERM,
 } from './icons.js';
 import { createAdapter, isDemo } from './data/index.js';
 import { createStore, saveSnapshot, readSnapshot, clearSnapshot } from './store.js';
@@ -1323,6 +1323,31 @@ async function newTicket(status = null) {
 /* ---------- ticket panel ---------- */
 
 function kickoff(t) { return `Continue ${disp(t)}.`; }
+
+// Where "Open in Claude Code" opens this ticket on this device. The folder comes from the
+// ticket's own sessions (and its parent's or phases'), newest first; then the project's
+// folders; then any session in the project. On a phone there is no CLI, so only the
+// command is offered, for the OS of the newest session.
+const THIS_OS = clientOS(navigator.userAgent, navigator.maxTouchPoints || 0);
+function launchPlan(x) {
+  const p = proj(x);
+  const par = x.parent_id ? D.tby.get(x.parent_id) : null;
+  const fam = [x, ...kidsOf(x), ...(par ? [par, ...kidsOf(par).filter((k) => k.id !== x.id)] : [])];
+  const newest = (ss) => ss.slice().sort((a, b) => ts(b.started_at) - ts(a.started_at)).map((s) => s.cwd);
+  const famCwds = newest(fam.flatMap((t) => D.sessions.get(t.id) || []));
+  const projCwds = newest(D.tickets.filter((t) => t.project_id === p.id).flatMap((t) => D.sessions.get(t.id) || []));
+  const knownPaths = D.projects.flatMap((q) => q.paths || []);
+  let os = THIS_OS;
+  if (!os) { const k = [...famCwds, ...projCwds].map(pathKind).find(Boolean); os = k === 'windows' ? 'windows' : 'mac'; }
+  const folder = launchFolder({ os, cwds: famCwds, projectPaths: p.paths || [], knownPaths })
+    || launchFolder({ os, cwds: projCwds, knownPaths });
+  return { os, folder, canOpen: !!THIS_OS && !!folder };
+}
+function launchRow(x) {
+  const L = launchPlan(x);
+  if (!L.folder) return THIS_OS ? '<div class="launch"><span class="where sub">No folder on this computer yet: start the first session from the folder, using the kickoff line.</span></div>' : '';
+  return `<div class="launch">${L.canOpen ? `<a class="btn primary" id="d-open" href="${esc(claudeLink(L.folder, kickoff(x)))}">${I_TERM}Open in Claude Code</a>` : ''}<span class="where" title="${esc(L.folder)}"><span class="sub">in</span> <span class="mono">${esc(L.folder)}</span></span><button class="btn ghost" id="d-cmd" data-cmd="${esc(claudeCommand(L.folder, kickoff(x), L.os))}">${I_COPY}Copy command</button></div>`;
+}
 function ticketUrl(t) {
   return location.origin + location.pathname + '?' + (isDemo() ? 'demo&' : '') + 't=' + encodeURIComponent(disp(t));
 }
@@ -1441,6 +1466,7 @@ function renderDrawer(fresh = false) {
       </dl>
     </div>
     <div class="kick"><span class="l">Pick up in a new session</span><code id="d-kick">${esc(kickoff(x))}</code><button class="btn" id="d-copy">${I_COPY}Copy</button></div>
+    ${launchRow(x)}
     ${isP ? `<div class="phl"><div class="ph-h">Phases<span class="prog"><span class="bar4"><i style="width:${Math.round((kdone / kids.length) * 100)}%"></i></span><span class="mono">${kdone}/${kids.length}</span></span></div><div class="rows">${kids.map((c) => row(c, { phase: true })).join('')}</div><button class="btn ghost add" id="d-addphase" ${ro}>${I_PLUS}Add phase</button></div>` : ''}
     <div>
       <div class="tabs" role="tablist" aria-label="Ticket detail">${tabs.map(([id, label, n]) => `<button class="tab" role="tab" id="tab-${id}" aria-controls="tp-${id}" aria-selected="${tab === id}" tabindex="${tab === id ? 0 : -1}" data-tab="${id}">${label}${n ? `<span class="c">${n}</span>` : ''}</button>`).join('')}</div>
@@ -1472,6 +1498,8 @@ function renderDrawer(fresh = false) {
   on('d-addnote', 'onclick', () => sendNote(x, $('d-note').value.trim()));
   on('d-note', 'onkeydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendNote(x, $('d-note').value.trim()); } });
   on('d-copy', 'onclick', () => copy($('d-kick').textContent, 'Kickoff copied', $('d-kick')));
+  on('d-cmd', 'onclick', (e) => copy(e.currentTarget.dataset.cmd, 'Command copied'));
+  on('d-open', 'onclick', () => toast('Opening Claude Code. Press Enter in the new terminal to start.'));
   host.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => copy(b.dataset.copy, 'Path copied')));
   host.querySelectorAll('.drawer [data-open], .drawer [data-goto]').forEach((b) => (b.onclick = () => openTicket(b.dataset.open || b.dataset.goto)));
   host.querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeDrawer));

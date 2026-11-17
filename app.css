@@ -325,6 +325,10 @@ a:hover{color:var(--accent-h)}
 .kick .l{font-size:12.5px;color:var(--muted);white-space:nowrap}
 .kick code{flex:1;font-family:var(--font-id);font-size:13px;color:var(--fg);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kick .btn{background:var(--surface);height:32px;padding:0 11px;font-size:12.5px;box-shadow:var(--sh-btn)}
+.launch{display:flex;align-items:center;gap:10px;min-width:0;margin-top:-6px;padding:0 4px}
+.launch .btn{height:32px;padding:0 12px;font-size:12.5px;text-decoration:none;flex:none}
+.launch .where{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg-3)}
+.launch .where .mono{font-family:var(--font-id);font-size:11.5px}
 .phl .ph-h{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:600;margin-bottom:6px}
 .phl .ph-h .prog{margin-left:auto;font-weight:400;color:var(--muted);font-size:11.5px}
 .phl .row{grid-template-columns:16px 60px minmax(0,1fr) auto;gap:12px;padding:8px 10px}
@@ -602,6 +606,9 @@ a.att-n:hover{color:var(--accent-text);text-decoration:underline}
   .kick .l{grid-column:1 / -1;font-size:12px;font-weight:500}
   .kick code{background:var(--sunk-2);border-radius:11px;padding:13px 14px;font-size:14px}
   .kick .btn{height:auto;align-self:stretch;padding:0 14px}
+  .launch{flex-direction:column;align-items:stretch;gap:8px;margin-top:-4px;padding:0}
+  .launch .btn{height:44px;justify-content:center}
+  .launch .where{white-space:normal;overflow-wrap:anywhere}
   .props{grid-template-columns:minmax(0,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:4px 0}
   .prop{grid-template-columns:96px minmax(0,1fr);min-height:44px;font-size:14px}
   .pbtn{min-height:36px}

@@ -139,6 +139,15 @@ Every key is read and written inside try/catch; the app renders the same without
 - **Projects and groups** writes through `updateProject`, `insertGroup`, `updateGroup` and `deleteGroup`, one change at a time, re-rendering after each. A drag rewrites the `sort` of every row it reorders, in steps of 10, and moves `group_id` when a project changes group. Deleting a group with projects first asks for a target group, moves its projects there, then deletes it. The Inbox can't be dragged or grouped.
 - **Project labels.** `projLabel()` shows `KEY - Name`, or just the key when the name is empty or equals the key (a Jira project created from a link is named after its key). Pickers and the New ticket dialog use it.
 
+## Open in Claude Code
+
+The ticket panel's **Open in Claude Code** is a link to `claude-cli://open?q=Continue%20KEY.&cwd=<folder>` (`claudeLink()` in `js/model.js`). Claude Code registers that scheme the first time it runs interactively on a computer (macOS, Windows, Linux; the `disableDeepLinkRegistration` setting turns it off). The handler opens a new terminal in `cwd` with `q` typed in and waits for Enter. It has no resume parameter, so every launch is a fresh session that loads the ticket from `Continue KEY.`. A browser without the handler does nothing, or shows its own error. A toast says to press Enter.
+
+- **The device.** `clientOS()` reads the user agent: `mac`, `windows` or `linux`; `null` on iPhone, iPad (a Mac user agent with touch points) and Android, which have no CLI. There the row offers only **Copy command**, for the OS of the newest recorded session.
+- **The folder** (`launchPlan()` in `js/app.js`, `launchFolder()` in `js/model.js`): the `cwd` of the ticket's sessions, together with its phases' (for a parent) or its parent's and sibling phases' (for a phase), newest first. Then the project's `paths`, then any session `cwd` in the project. Only paths of this OS's kind count (`pathKind()`: a drive letter or UNC path is Windows, `/…` is POSIX). Temp folders (`/tmp`, `/private/var/folders`, `%TEMP%`) and the desktop app's scratch workspaces are skipped. A `cwd` inside `<repo>/.claude/worktrees/<name>` is cut back to the repo, since the worktree may have been removed. A `cwd` at or inside any project's path (longest match, case-insensitive on Windows) opens at that path.
+- `relay.projects.paths` holds Mac paths only (the work laptop maps folders in its local `paths.json`), so on Windows the folder always comes from a recorded session.
+- **Copy command** (`claudeCommand()`): `cd '<folder>' && claude "Continue KEY."` on a Mac or Linux, with `'` escaped as `'\''`; on Windows the PowerShell form `cd '<folder>'; claude "Continue KEY."`, with `'` doubled.
+
 ## Attachments
 
 Files on a ticket live in the private Storage bucket `relay-attachments` (50 MB each, any type), one row each in `relay.attachments`; see silver-octo-invention `docs/relay-SUPABASE.md` → Attachments.

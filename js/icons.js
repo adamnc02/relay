@@ -65,6 +65,7 @@ export const I_DL = sv(14, '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>', ' stroke
 export const I_UPLOAD = sv(14, '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>', ' stroke-width="2"');
 export const I_CLIPBOARD = sv(14, '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>', ' stroke-width="2"');
 export const I_FILE = sv(18, '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>', ' stroke-width="1.7"');
+export const I_TERM = sv(14, '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3 3-3 3M13 15h4"/>', ' stroke-width="2"');
 export const I_CODE = sv(14, '<path d="m8 8-4 4 4 4M16 8l4 4-4 4"/>', ' stroke-width="2"');
 export const I_BUG = sv(14, '<rect x="8" y="6" width="8" height="14" rx="4"/><path d="M12 20v-8M8 13H4M20 13h-4M9 7 7 4M15 7l2-3M8.5 17l-3 2M15.5 17l3 2"/>', ' stroke-width="2"');
 // The marker before a bug's title. Dev tickets show nothing.
