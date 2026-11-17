@@ -22,9 +22,15 @@ The CLI is `~/.claude/relay/bin/relay`. The argument after `/close` picks the ou
    (`relay brief`), so the next session starts from the truth.
 3. **Write the summary**: two lines on what this session finished. Collect this session's commit
    SHAs and PR URLs.
-4. **Update the plain summary**: `relay summary "…"`, two to four plain-English sentences on the
-   issue, what's been done and what happens next, written for someone non-technical (no file
-   names, branches, PRs or jargon). The app drafts email and Teams updates from it.
+4. **Update both summaries**, written **as Adam, to the reader** ("I", "we", never "Adam" or
+   "he"): the app drafts email and Teams updates from them that Adam sends under his own name.
+   What's left for Adam is his own next step ("I'm reviewing it next"); what's needed from the
+   reader is asked of them ("could you confirm…?").
+   - `relay summary "…"`: two to four plain-English sentences on the issue, what's been done and
+     what happens next, for someone non-technical (no file names, branches, PRs or jargon).
+   - `relay summary --tech "…"`: two to five sentences for a technical reader: the issue, the
+     cause, what changed and what's next. It may name systems, reports, tables, fields and
+     measures, but no local file paths, branch names, PR links or session plumbing.
 5. **Run it**, for example:
 
    ```bash

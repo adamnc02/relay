@@ -746,6 +746,23 @@ class Rly20(unittest.TestCase):
         self.assertIn("Plain summary of RLY-20 updated", out.getvalue())
         self.assertRaises(relay.RelayError, self.run_cmd, ["summary", " "], {})
 
+    def test_summary_tech_writes_the_technical_summary(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            calls = self.run_cmd(["summary", "--tech", "The", "join", "now", "uses", "po_id."],
+                                 {relay.SQL_SUMMARY_TECH: {"key": "RLY-24", "length": 29}})
+        self.assertEqual(calls[-1][0], relay.SQL_SUMMARY_TECH)
+        self.assertEqual(calls[-1][1]["text"], "The join now uses po_id.")
+        self.assertIn("Technical summary of RLY-24 updated", out.getvalue())
+        self.assertIn("set summary_tech = :'text'", relay.SQL_SUMMARY_TECH)
+
+    def test_get_prints_both_summaries(self):
+        d = {"ticket": {"key": "RLY-24", "title": "Drafts", "status": "progress", "project": "RLY",
+                        "project_name": "Relay", "summary_plain": "I fixed it.", "summary_tech": None}}
+        out = relay.format_get(d)
+        self.assertIn("'summary_tech', t.summary_tech", relay.SQL_GET)
+        self.assertIn("Plain summary: I fixed it.", out)
+        self.assertIn("Technical summary: (none yet: write one with relay summary --tech)", out)
+
     def test_create_and_get_carry_type(self):
         self.assertIn("type)", relay.SQL_CREATE)
         self.assertIn(":'type'", relay.SQL_CREATE)
